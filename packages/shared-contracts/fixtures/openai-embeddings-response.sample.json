@@ -1,0 +1,16 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "index": 0,
+      "embedding": [0.12, -0.34, 0.56]
+    }
+  ],
+  "model": "model_bge_small_en",
+  "usage": {
+    "prompt_tokens": 2,
+    "completion_tokens": 0,
+    "total_tokens": 2
+  }
+}

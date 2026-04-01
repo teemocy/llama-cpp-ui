@@ -155,10 +155,7 @@ function toSafeNumber(value: bigint): number | undefined {
   return Number(value);
 }
 
-async function readScalarValue(
-  cursor: GgufCursor,
-  valueType: GgufValueType,
-): Promise<JsonValue> {
+async function readScalarValue(cursor: GgufCursor, valueType: GgufValueType): Promise<JsonValue> {
   switch (valueType) {
     case GgufValueType.Uint8:
       return cursor.readUint8();
@@ -193,10 +190,7 @@ async function readScalarValue(
   }
 }
 
-async function readValue(
-  cursor: GgufCursor,
-  valueType: GgufValueType,
-): Promise<JsonValue> {
+async function readValue(cursor: GgufCursor, valueType: GgufValueType): Promise<JsonValue> {
   if (valueType !== GgufValueType.Array) {
     return readScalarValue(cursor, valueType);
   }
@@ -265,7 +259,10 @@ function deriveArchitecture(metadata: Record<string, JsonValue>): string | undef
   );
 }
 
-function deriveContextLength(metadata: Record<string, JsonValue>, architecture?: string): number | undefined {
+function deriveContextLength(
+  metadata: Record<string, JsonValue>,
+  architecture?: string,
+): number | undefined {
   const keys = [
     "general.context_length",
     architecture ? `${architecture}.context_length` : undefined,
@@ -362,8 +359,7 @@ export async function sniffGgufFile(filePath: string): Promise<SniffedGgufMetada
     const parameterCount = deriveParameterCount(metadata, architecture);
     const embeddingLength = deriveEmbeddingLength(metadata, architecture);
     const tokenizer =
-      firstString(metadata["tokenizer.ggml.model"]) ??
-      firstString(metadata["tokenizer.model"]);
+      firstString(metadata["tokenizer.ggml.model"]) ?? firstString(metadata["tokenizer.model"]);
     const chatTemplate =
       firstString(metadata["tokenizer.chat_template"]) ??
       firstString(metadata["tokenizer.ggml.chat_template"]);
@@ -455,9 +451,7 @@ export async function verifyGgufFile(
 export function toArtifactMetadata(sniffed: SniffedGgufMetadata): ModelArtifact["metadata"] {
   const metadata: GgufMetadata["metadata"] = {
     ...sniffed.metadata,
-    ...(sniffed.embeddingLength !== undefined
-      ? { embeddingLength: sniffed.embeddingLength }
-      : {}),
+    ...(sniffed.embeddingLength !== undefined ? { embeddingLength: sniffed.embeddingLength } : {}),
     ...(sniffed.chatTemplate ? { chatTemplate: sniffed.chatTemplate } : {}),
   };
 

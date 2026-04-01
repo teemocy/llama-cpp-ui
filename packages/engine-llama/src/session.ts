@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { once } from "node:events";
 
 import type {
@@ -83,6 +83,15 @@ export async function launchLlamaCppSession(
       }
 
       const exitPromise = once(child, "exit").then(() => undefined);
+      if (command.healthUrl?.startsWith("http")) {
+        try {
+          await fetch(`${command.healthUrl.replace(/\/+$/, "")}/control/shutdown`, {
+            method: "POST",
+            signal: AbortSignal.timeout(500),
+          });
+        } catch {}
+      }
+
       if (child.exitCode === null) {
         child.kill("SIGTERM");
       }

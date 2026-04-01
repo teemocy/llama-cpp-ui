@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "model_qwen25_coder",
+      "object": "model",
+      "created": 1774958400,
+      "owned_by": "localhub"
+    },
+    {
+      "id": "model_bge_small_en",
+      "object": "model",
+      "created": 1774958401,
+      "owned_by": "localhub"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "traceId": "trace_stage3_123456",
+  "requestId": "req_stage3_123456",
+  "route": "POST /v1/chat/completions",
+  "method": "POST",
+  "modelId": "model_qwen25_coder",
+  "runtimeKey": {
+    "modelId": "model_qwen25_coder",
+    "engineType": "llama.cpp",
+    "role": "chat",
+    "configHash": "cfg_qwen25_coder_default"
+  },
+  "remoteAddress": "127.0.0.1",
+  "receivedAt": "2026-04-01T12:00:00.000Z",
+  "completedAt": "2026-04-01T12:00:01.200Z",
+  "durationMs": 1200,
+  "ttftMs": 150,
+  "promptTokens": 24,
+  "completionTokens": 18,
+  "statusCode": 200,
+  "metadata": {
+    "plane": "public",
+    "stream": true
+  }
+}

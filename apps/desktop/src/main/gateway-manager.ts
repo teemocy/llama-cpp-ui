@@ -8,20 +8,38 @@ import process from "node:process";
 import type { Readable } from "node:stream";
 import { readGatewayDiscoveryFile, resolveAppPaths } from "@localhub/platform";
 import {
+  type DesktopApiLogList,
+  type DesktopChatMessageList,
+  type DesktopChatRunRequest,
+  type DesktopChatRunResponse,
+  type DesktopChatSessionList,
+  type DesktopChatSessionUpsertRequest,
+  type DesktopDownloadActionResponse,
+  type DesktopDownloadCreateRequest,
+  type DesktopDownloadList,
   type DesktopEngineList,
   type DesktopLocalModelImportRequest,
   type DesktopLocalModelImportResponse,
   type DesktopModelLibrary,
   type DesktopModelRecord,
+  type DesktopProviderSearchResult,
   type DesktopShellState,
   type GatewayDiscoveryFile,
   type GatewayEvent,
   type GatewayHealthSnapshot,
   type PublicModelList,
   type RequestRoute,
+  chatSessionSchema,
+  desktopApiLogListSchema,
+  desktopChatMessageListSchema,
+  desktopChatRunResponseSchema,
+  desktopChatSessionListSchema,
+  desktopDownloadActionResponseSchema,
+  desktopDownloadListSchema,
   desktopEngineListSchema,
   desktopLocalModelImportResponseSchema,
   desktopModelLibrarySchema,
+  desktopProviderSearchResultSchema,
   desktopShellStateSchema,
   gatewayEventSchema,
   gatewayHealthSnapshotSchema,
@@ -208,6 +226,11 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "POST /control/models/register-local":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
+    case "GET /control/chat/sessions":
+    case "GET /control/chat/messages":
+    case "POST /control/chat/sessions":
+    case "POST /control/chat/run":
+    case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
     case "POST /control/downloads":
@@ -470,6 +493,147 @@ export class GatewayManager extends EventEmitter {
       }),
       `Unable to evict ${modelId}.`,
     );
+  }
+
+  async listChatSessions(): Promise<DesktopChatSessionList> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/chat/sessions`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load chat sessions.",
+    );
+
+    return desktopChatSessionListSchema.parse(payload);
+  }
+
+  async listChatMessages(sessionId: string): Promise<DesktopChatMessageList> {
+    const discovery = this.requireDiscovery();
+    const encodedId = encodeURIComponent(sessionId);
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/chat/messages?sessionId=${encodedId}`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load chat messages.",
+    );
+
+    return desktopChatMessageListSchema.parse(payload);
+  }
+
+  async upsertChatSession(input: DesktopChatSessionUpsertRequest): Promise<DesktopChatSessionList["data"][number]> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/chat/sessions`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(input),
+      }),
+      "Unable to save chat session.",
+    );
+    return chatSessionSchema.parse(payload);
+  }
+
+  async runChat(input: DesktopChatRunRequest): Promise<DesktopChatRunResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/chat/run`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(input),
+      }),
+      "Unable to run chat request.",
+    );
+
+    return desktopChatRunResponseSchema.parse(payload);
+  }
+
+  async listApiLogs(limit = 30): Promise<DesktopApiLogList> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/observability/api-logs?limit=${limit}`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load API logs.",
+    );
+
+    return desktopApiLogListSchema.parse(payload);
+  }
+
+  async searchCatalog(query: string): Promise<DesktopProviderSearchResult> {
+    const discovery = this.requireDiscovery();
+    const encoded = encodeURIComponent(query.trim());
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads?q=${encoded}`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to search model catalog.",
+    );
+
+    return desktopProviderSearchResultSchema.parse(payload);
+  }
+
+  async listDownloads(): Promise<DesktopDownloadList> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to load download tasks.",
+    );
+
+    return desktopDownloadListSchema.parse(payload);
+  }
+
+  async createDownload(input: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(input),
+      }),
+      "Unable to create download task.",
+    );
+
+    return desktopDownloadActionResponseSchema.parse(payload);
+  }
+
+  async pauseDownload(id: string): Promise<DesktopDownloadActionResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ action: "pause", id }),
+      }),
+      "Unable to pause download task.",
+    );
+
+    return desktopDownloadActionResponseSchema.parse(payload);
+  }
+
+  async resumeDownload(id: string): Promise<DesktopDownloadActionResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ action: "resume", id }),
+      }),
+      "Unable to resume download task.",
+    );
+
+    return desktopDownloadActionResponseSchema.parse(payload);
   }
 
   async stop(): Promise<void> {

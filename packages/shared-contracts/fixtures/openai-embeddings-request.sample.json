@@ -1,0 +1,5 @@
+{
+  "model": "model_bge_small_en",
+  "input": ["hello world"],
+  "user": "desktop-shell"
+}

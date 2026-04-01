@@ -1,12 +1,23 @@
 import type {
+  DesktopApiLogList,
+  DesktopChatMessageList,
+  DesktopChatRunRequest,
+  DesktopChatRunResponse,
+  DesktopChatSessionList,
+  DesktopChatSessionUpsertRequest,
+  DesktopDownloadActionResponse,
+  DesktopDownloadCreateRequest,
+  DesktopDownloadList,
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelLibrary,
+  DesktopProviderSearchResult,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
   PublicModelList,
+  ChatSession,
 } from "@localhub/shared-contracts";
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
@@ -52,6 +63,26 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.gatewayPreloadModel, modelId) as Promise<void>,
     evictModel: (modelId: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayEvictModel, modelId) as Promise<void>,
+    listChatSessions: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListChatSessions) as Promise<DesktopChatSessionList>,
+    listChatMessages: (sessionId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListChatMessages, sessionId) as Promise<DesktopChatMessageList>,
+    upsertChatSession: (payload: DesktopChatSessionUpsertRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayUpsertChatSession, payload) as Promise<ChatSession>,
+    runChat: (payload: DesktopChatRunRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayRunChat, payload) as Promise<DesktopChatRunResponse>,
+    listApiLogs: (limit?: number) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListApiLogs, limit) as Promise<DesktopApiLogList>,
+    searchCatalog: (query: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewaySearchCatalog, query) as Promise<DesktopProviderSearchResult>,
+    listDownloads: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListDownloads) as Promise<DesktopDownloadList>,
+    createDownload: (payload: DesktopDownloadCreateRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayCreateDownload, payload) as Promise<DesktopDownloadActionResponse>,
+    pauseDownload: (id: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayPauseDownload, id) as Promise<DesktopDownloadActionResponse>,
+    resumeDownload: (id: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayResumeDownload, id) as Promise<DesktopDownloadActionResponse>,
     subscribeEvents: (listener: Listener<GatewayEvent>) =>
       subscribe(IPC_CHANNELS.gatewayEvent, listener),
     openModelFileDialog: () =>

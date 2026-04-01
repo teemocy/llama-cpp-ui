@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
+import { deserializeToolCalls, serializeToolCalls } from "@localhub/shared-contracts";
 import {
   type ApiLogRecord,
   type ChatMessage,
@@ -8,7 +9,9 @@ import {
   chatMessageSchema,
   chatSessionSchema,
 } from "@localhub/shared-contracts/foundation-persistence";
+import type { RequestTrace } from "@localhub/shared-contracts/foundation-request-tracing";
 
+import { requestTraceToApiLogRecord } from "../request-trace-persistence.js";
 import { parseJson, stringifyJson } from "./helpers.js";
 
 export class ChatRepository {
@@ -70,7 +73,7 @@ export class ChatRepository {
         parsed.sessionId,
         parsed.role,
         parsed.content,
-        stringifyJson(parsed.toolCalls),
+        serializeToolCalls(parsed.toolCalls),
         parsed.tokensCount ?? null,
         stringifyJson(parsed.metadata),
         parsed.createdAt,
@@ -130,7 +133,7 @@ export class ChatRepository {
         sessionId: row.session_id,
         role: row.role,
         content: row.content,
-        toolCalls: parseJson(row.tool_calls_json, []),
+        toolCalls: deserializeToolCalls(row.tool_calls_json),
         tokensCount: row.tokens_count ?? undefined,
         metadata: parseJson(row.metadata_json, {}),
         createdAt: row.created_at,
@@ -176,6 +179,10 @@ export class ChatRepository {
       ) as { lastInsertRowid: number | bigint };
 
     return Number(result.lastInsertRowid);
+  }
+
+  insertRequestTrace(trace: RequestTrace): number {
+    return this.insertApiLog(requestTraceToApiLogRecord(trace));
   }
 
   listRecentApiLogs(limit = 50): ApiLogRecord[] {

@@ -1,6 +1,6 @@
-import type { ResolveCommandInput, EngineAdapter } from "@localhub/engine-core";
+import type { EngineAdapter, ResolveCommandInput } from "@localhub/engine-core";
 
-import { launchLlamaCppSession, type LiveLlamaCppSession } from "./session.js";
+import { type LiveLlamaCppSession, launchLlamaCppSession } from "./session.js";
 
 export function buildFakeLlamaCppWorkerProgram(): string {
   return [
@@ -13,7 +13,7 @@ export function buildFakeLlamaCppWorkerProgram(): string {
     "const startedAt = Date.now();",
     "let shutdownStarted = false;",
     "const keepAliveTimer = setInterval(() => {}, 60_000);",
-    'const emit = (payload) => process.stdout.write(`${JSON.stringify(payload)}\\n`);',
+    "const emit = (payload) => process.stdout.write(`${JSON.stringify(payload)}\\n`);",
     "const writeHealth = (state) => {",
     "  if (!healthFile) {",
     "    return;",
@@ -59,7 +59,7 @@ export function buildFakeLlamaCppWorkerProgram(): string {
     'process.on("SIGTERM", () => shutdown("sigterm"));',
     'process.on("SIGINT", () => shutdown("sigint"));',
     'process.on("uncaughtException", (error) => {',
-    '  process.stderr.write(`${String(error?.stack ?? error)}\\n`);',
+    "  process.stderr.write(`${String(error?.stack ?? error)}\\n`);",
     "  process.exit(1);",
     "});",
   ].join("\n");

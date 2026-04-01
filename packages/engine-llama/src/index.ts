@@ -2,13 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
-  activateEngineVersion,
-  createEmptyEngineVersionRegistry,
-  ensureEngineSupportPaths,
-  getActiveEngineVersion,
-  readEngineVersionRegistry,
-  resolveEngineSupportPaths,
-  runtimeKeyToString,
   type EngineAdapter,
   type EngineHealthCheck,
   type EngineInstallResult,
@@ -16,6 +9,13 @@ import {
   type EngineVersionRecord,
   type ResolveCommandInput,
   type ResolvedCommand,
+  activateEngineVersion,
+  createEmptyEngineVersionRegistry,
+  ensureEngineSupportPaths,
+  getActiveEngineVersion,
+  readEngineVersionRegistry,
+  resolveEngineSupportPaths,
+  runtimeKeyToString,
   upsertEngineVersionRecord,
   writeEngineVersionRegistry,
 } from "@localhub/engine-core";
@@ -29,8 +29,10 @@ import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 import { buildFakeLlamaCppWorkerProgram, createLlamaCppHarness } from "./fake-worker.js";
 
 export * from "./fixtures.js";
+export * from "./download-manager.js";
 export * from "./gguf.js";
 export * from "./model-manager.js";
+export * from "./providers.js";
 export * from "./session.js";
 
 const LLAMA_CPP_ENGINE_TYPE = "llama.cpp";
@@ -116,8 +118,7 @@ function findExecutableOnPath(
   env: NodeJS.ProcessEnv,
 ): string | undefined {
   const pathEntries = splitPathEntries(env.PATH);
-  const executableSuffixes =
-    process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
+  const executableSuffixes = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
 
   for (const entry of pathEntries) {
     for (const name of candidateNames) {
@@ -145,11 +146,7 @@ function derivePort(runtimeKey: RuntimeKey, basePort: number): number {
   return basePort + (hashPortSeed(runtimeKeyToString(runtimeKey)) % 2_000);
 }
 
-function buildBinaryArgs(
-  input: ResolveCommandInput,
-  host: string,
-  port: number,
-): string[] {
+function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number): string[] {
   const args = [
     "--model",
     input.artifact.localPath,
@@ -301,7 +298,8 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     input: ResolveCommandInput,
   ): Promise<{ versionTag: string; managedBy: "binary" | "fake-worker"; binaryPath: string }> {
     const { registry } = loadRegistry(input.supportRoot);
-    const requestedVersion = input.versionTag ?? registry.activeVersionTag ?? DEFAULT_FAKE_VERSION_TAG;
+    const requestedVersion =
+      input.versionTag ?? registry.activeVersionTag ?? DEFAULT_FAKE_VERSION_TAG;
 
     if (!registry.activeVersionTag || !getActiveEngineVersion(registry)) {
       const installResult = await ensureInstalledVersion(requestedVersion, input.supportRoot);
@@ -339,7 +337,11 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       const activeVersion = getActiveEngineVersion(registry);
       const systemBinaryPath = findExecutableOnPath(LLAMA_CPP_BINARY_CANDIDATES, env);
 
-      if (activeVersion && activeVersion.managedBy === "binary" && existsSync(activeVersion.binaryPath)) {
+      if (
+        activeVersion &&
+        activeVersion.managedBy === "binary" &&
+        existsSync(activeVersion.binaryPath)
+      ) {
         return {
           available: true,
           detectedVersion: activeVersion.versionTag,
@@ -405,7 +407,9 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     async resolveCommand(input: ResolveCommandInput): Promise<ResolvedCommand> {
       const { paths } = loadRegistry(input.supportRoot);
       const host = input.host ?? options.defaultHost ?? "127.0.0.1";
-      const port = input.port ?? derivePort(input.runtimeKey, options.fakeWorkerBasePort ?? DEFAULT_FAKE_BASE_PORT);
+      const port =
+        input.port ??
+        derivePort(input.runtimeKey, options.fakeWorkerBasePort ?? DEFAULT_FAKE_BASE_PORT);
       const runtimeKeyString = runtimeKeyToString(input.runtimeKey);
       const runtimeDir = path.join(paths.runtimeRoot, runtimeKeyString);
       const runtimePlanPath = path.join(runtimeDir, "launch-plan.json");
@@ -435,7 +439,9 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
             versionTag: activeVersion.versionTag,
             notes: [
               `Using registered llama.cpp binary ${activeVersion.binaryPath}.`,
-              ...(systemBinaryPath ? [`System binary candidate detected at ${systemBinaryPath}.`] : []),
+              ...(systemBinaryPath
+                ? [`System binary candidate detected at ${systemBinaryPath}.`]
+                : []),
             ],
           }
         : {
@@ -443,8 +449,6 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
             args: ["--input-type=module", "--eval", buildFakeLlamaCppWorkerProgram()],
             cwd: runtimeDir,
             env: {
-              LOCALHUB_FAKE_HOST: host,
-              LOCALHUB_FAKE_PORT: String(port),
               LOCALHUB_RUNTIME_KEY: runtimeKeyString,
               LOCALHUB_MODEL_ID: input.artifact.id,
               LOCALHUB_MODEL_PATH: input.artifact.localPath,
@@ -486,7 +490,10 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
         };
       }
 
-      if (plan.command.managedBy === "fake-worker" && plan.command.healthUrl.startsWith("file://")) {
+      if (
+        plan.command.managedBy === "fake-worker" &&
+        plan.command.healthUrl.startsWith("file://")
+      ) {
         const healthFilePath = plan.command.healthUrl.slice("file://".length);
         if (!existsSync(healthFilePath)) {
           return {
@@ -524,7 +531,9 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
               state: "degraded",
               checkedAt: nowIso(),
               healthUrl: plan.command.healthUrl,
-              notes: [error instanceof Error ? error.message : "Failed to parse fake worker health file."],
+              notes: [
+                error instanceof Error ? error.message : "Failed to parse fake worker health file.",
+              ],
             },
           };
         }

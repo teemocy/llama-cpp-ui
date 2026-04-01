@@ -14,8 +14,10 @@
     "./foundation-models": "./dist/models.js",
     "./foundation-openai": "./dist/openai.js",
     "./foundation-persistence": "./dist/persistence.js",
+    "./foundation-providers": "./dist/contracts/providers.js",
     "./foundation-request-tracing": "./dist/request-tracing.js",
-    "./foundation-runtime": "./dist/runtime.js"
+    "./foundation-runtime": "./dist/runtime.js",
+    "./foundation-serialization": "./dist/serialization.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

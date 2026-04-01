@@ -1,18 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { Readable } from "node:stream";
 
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { resolveAppPaths, writeGatewayDiscoveryFile } from "@localhub/platform";
-import { desktopLocalModelImportRequestSchema } from "@localhub/shared-contracts";
-import Fastify, { type FastifyInstance } from "fastify";
+import {
+  chatCompletionsRequestSchema,
+  desktopChatRunRequestSchema,
+  desktopChatSessionUpsertRequestSchema,
+  desktopDownloadCreateRequestSchema,
+  desktopLocalModelImportRequestSchema,
+  embeddingsRequestSchema,
+} from "@localhub/shared-contracts";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { WebSocket } from "ws";
 
 import type { GatewayConfig } from "../config.js";
 import { MockGatewayRuntime } from "../runtime/mockRuntime.js";
 import { createRepositoryGatewayRuntime } from "../runtime/repositoryRuntime.js";
-import type { GatewayPlane, GatewayRuntime } from "../types.js";
+import { type GatewayPlane, GatewayRequestError, type GatewayRuntime } from "../types.js";
 import { createBearerAuthHook } from "./auth.js";
 import { createLoopbackOnlyHook, getRequestPath, isOriginAllowed } from "./network.js";
 
@@ -35,6 +43,14 @@ interface GatewayStoppables {
   publicApp: Pick<FastifyInstance, "close">;
   controlApp: Pick<FastifyInstance, "close">;
   runtime: Pick<GatewayRuntime, "stop">;
+}
+
+function sendValidationError(reply: FastifyReply, requestId: string, message: string) {
+  return reply.code(400).send({
+    error: "validation_error",
+    message,
+    requestId,
+  });
 }
 
 export async function stopGatewayServices(
@@ -120,6 +136,34 @@ function isUnknownModelError(error: unknown): boolean {
   return error instanceof Error && error.message.startsWith("Unknown model:");
 }
 
+function toGatewayErrorResponse(error: unknown): {
+  statusCode: number;
+  code: string;
+  message: string;
+} {
+  if (error instanceof GatewayRequestError) {
+    return {
+      statusCode: error.statusCode,
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  if (isUnknownModelError(error)) {
+    return {
+      statusCode: 404,
+      code: "model_not_found",
+      message: error instanceof Error ? error.message : "Unknown model.",
+    };
+  }
+
+  return {
+    statusCode: 500,
+    code: "internal_error",
+    message: error instanceof Error ? error.message : "Unhandled gateway error.",
+  };
+}
+
 async function registerPublicApp(
   app: FastifyInstance,
   config: GatewayConfig,
@@ -150,6 +194,79 @@ async function registerPublicApp(
     object: "list",
     data: runtime.listModels(),
   }));
+
+  app.post("/v1/chat/completions", async (request, reply) => {
+    const parsed = chatCompletionsRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: parsed.error.issues[0]?.message ?? "A valid chat completion request is required.",
+        requestId: request.id,
+      });
+    }
+
+    try {
+      if (parsed.data.stream) {
+        const result = await runtime.createChatCompletionStream(parsed.data, {
+          traceId: request.id,
+          remoteAddress:
+            request.ip || request.socket?.remoteAddress || request.raw.socket?.remoteAddress,
+        });
+
+        reply.hijack();
+        reply.raw.statusCode = 200;
+        reply.raw.setHeader("content-type", result.contentType);
+        reply.raw.setHeader("cache-control", "no-cache, no-transform");
+        reply.raw.setHeader("connection", "keep-alive");
+        reply.raw.setHeader("x-request-id", request.id);
+        Readable.fromWeb(result.stream as globalThis.ReadableStream<Uint8Array>).pipe(reply.raw);
+        return reply;
+      }
+
+      const response = await runtime.createChatCompletion(parsed.data, {
+        traceId: request.id,
+        remoteAddress:
+          request.ip || request.socket?.remoteAddress || request.raw.socket?.remoteAddress,
+      });
+
+      return reply.code(200).send(response);
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
+        requestId: request.id,
+      });
+    }
+  });
+
+  app.post("/v1/embeddings", async (request, reply) => {
+    const parsed = embeddingsRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: parsed.error.issues[0]?.message ?? "A valid embeddings request is required.",
+        requestId: request.id,
+      });
+    }
+
+    try {
+      const response = await runtime.createEmbeddings(parsed.data, {
+        traceId: request.id,
+        remoteAddress:
+          request.ip || request.socket?.remoteAddress || request.raw.socket?.remoteAddress,
+      });
+
+      return reply.code(200).send(response);
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
+        requestId: request.id,
+      });
+    }
+  });
 }
 
 async function registerControlApp(
@@ -259,16 +376,109 @@ async function registerControlApp(
     }
   });
 
-  app.get("/control/downloads", async () => ({
-    data: runtime.listDownloads(),
-  }));
+  app.get("/control/chat/sessions", async () => runtime.listChatSessions());
 
-  app.post("/control/downloads", async (_request, reply) =>
-    reply.code(202).send({
-      accepted: true,
-      message: "Mock download scheduling is wired for Stage 1.",
-    }),
-  );
+  app.get("/control/chat/messages", async (request, reply) => {
+    const rawSessionId = (request.query as { sessionId?: unknown }).sessionId;
+    const sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
+    if (sessionId.length === 0) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: "sessionId is required.",
+        requestId: request.id,
+      });
+    }
+
+    return runtime.listChatMessages(sessionId);
+  });
+
+  app.post("/control/chat/sessions", async (request, reply) => {
+    const parsed = desktopChatSessionUpsertRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid chat session payload.",
+      );
+    }
+
+    return runtime.upsertChatSession(parsed.data);
+  });
+
+  app.post("/control/chat/run", async (request, reply) => {
+    const parsed = desktopChatRunRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid chat run payload.",
+      );
+    }
+
+    return runtime.runChat(parsed.data, request.id);
+  });
+
+  app.get("/control/observability/api-logs", async (request) => {
+    const rawLimit = (request.query as { limit?: unknown }).limit;
+    const limit =
+      typeof rawLimit === "number"
+        ? rawLimit
+        : typeof rawLimit === "string"
+          ? Number.parseInt(rawLimit, 10)
+          : 30;
+    return runtime.listRecentApiLogs(Number.isFinite(limit) && limit > 0 ? limit : 30);
+  });
+
+  app.get("/control/downloads", async (request) => {
+    const rawQuery = (request.query as { q?: unknown }).q;
+    const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+
+    if (query.length > 0) {
+      return runtime.searchCatalog(query);
+    }
+
+    return runtime.listDownloads();
+  });
+
+  app.post("/control/downloads", async (request, reply) => {
+    const payload = (request.body ?? {}) as Record<string, unknown>;
+    const action = typeof payload.action === "string" ? payload.action : "create";
+
+    if (action === "pause") {
+      if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Download id is required for pause.",
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(202).send(await runtime.pauseDownload(payload.id, request.id));
+    }
+
+    if (action === "resume") {
+      if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Download id is required for resume.",
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(202).send(await runtime.resumeDownload(payload.id, request.id));
+    }
+
+    const parsed = desktopDownloadCreateRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid download payload.",
+      );
+    }
+
+    return reply.code(202).send(await runtime.createDownload(parsed.data, request.id));
+  });
 
   app.get("/control/engines", async () => ({
     object: "list",

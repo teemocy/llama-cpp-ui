@@ -1,0 +1,35 @@
+{
+  "model": "model_qwen25_coder",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a local coding assistant."
+    },
+    {
+      "role": "user",
+      "content": "Write a TypeScript function that adds two numbers."
+    }
+  ],
+  "stream": true,
+  "temperature": 0.2,
+  "max_tokens": 256,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "lookup_docs",
+        "description": "Search local documentation",
+        "parameters": {
+          "type": "object"
+        }
+      }
+    }
+  ],
+  "extra_body": {
+    "localhub": {
+      "prompt_cache_key": "cache_qwen25",
+      "trace_label": "chat-stage3",
+      "ttl_override_ms": 600000
+    }
+  }
+}

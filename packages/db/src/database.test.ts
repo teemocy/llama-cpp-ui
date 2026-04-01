@@ -18,7 +18,9 @@ import {
   fixtureModelArtifact,
   fixtureModelProfile,
   fixturePromptCacheRecord,
+  fixtureRequestTrace,
   pruneApiLogs,
+  requestTraceToApiLogRecord,
   runCoreRuntimeRetention,
 } from "./index.js";
 
@@ -84,6 +86,30 @@ describe("db foundation", () => {
     expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(1);
     expect(apiLogId).toBeGreaterThan(0);
     expect(chat.listRecentApiLogs()).toHaveLength(1);
+  });
+
+  it("maps request traces into persisted api logs", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const models = new ModelsRepository(testDatabase.database);
+    const chat = new ChatRepository(testDatabase.database);
+    models.save(fixtureModelArtifact, fixtureModelProfile);
+    const mapped = requestTraceToApiLogRecord(fixtureRequestTrace);
+    const id = chat.insertRequestTrace(fixtureRequestTrace);
+    const stored = chat.listRecentApiLogs();
+
+    expect(id).toBeGreaterThan(0);
+    expect(mapped.endpoint).toBe("/v1/chat/completions");
+    expect(mapped.tokensPerSecond).toBe(35);
+    expect(stored[0]).toMatchObject({
+      traceId: fixtureRequestTrace.traceId,
+      endpoint: "/v1/chat/completions",
+      promptTokens: fixtureRequestTrace.promptTokens,
+      completionTokens: fixtureRequestTrace.completionTokens,
+      totalDurationMs: fixtureRequestTrace.durationMs,
+      ttftMs: fixtureRequestTrace.ttftMs,
+    });
   });
 
   it("prunes api logs by age", () => {

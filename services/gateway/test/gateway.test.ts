@@ -311,4 +311,56 @@ describe("gateway skeleton", () => {
       await rm(supportRoot, { recursive: true, force: true });
     }
   });
+
+  it("returns 400 validation_error for malformed stage 3 control payloads", async () => {
+    const gateway = await createTestGateway();
+
+    const chatSessionResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/chat/sessions",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        id: 123,
+      },
+    });
+
+    const chatRunResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/chat/run",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        model: "",
+        message: "",
+      },
+    });
+
+    const downloadCreateResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        provider: "huggingface",
+        providerModelId: "",
+      },
+    });
+
+    expect(chatSessionResponse.statusCode).toBe(400);
+    expect(chatSessionResponse.json()).toMatchObject({
+      error: "validation_error",
+    });
+    expect(chatRunResponse.statusCode).toBe(400);
+    expect(chatRunResponse.json()).toMatchObject({
+      error: "validation_error",
+    });
+    expect(downloadCreateResponse.statusCode).toBe(400);
+    expect(downloadCreateResponse.json()).toMatchObject({
+      error: "validation_error",
+    });
+  });
 });

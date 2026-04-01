@@ -18,3 +18,12 @@ Stage 2 fixture snapshots:
 - `foundation-worker-state.sample.json`
 - `foundation-download-task.sample.json`
 - `foundation-gateway-event.sample.json`
+
+Stage 3 compatibility fixtures:
+- `openai-chat-completions-request.sample.json`
+- `openai-chat-completions-response.sample.json`
+- `openai-chat-completion-chunk.sample.json`
+- `openai-embeddings-request.sample.json`
+- `openai-embeddings-response.sample.json`
+- `openai-model-list.sample.json`
+- `foundation-request-trace.sample.json`

@@ -3,15 +3,18 @@ import path from "node:path";
 
 import type { EngineVersionsRepository, ModelsRepository } from "@localhub/db";
 import type {
-  EngineVersionRecord,
-} from "@localhub/shared-contracts/foundation-persistence";
-import type { CapabilitySet, ModelArtifact, ModelProfile, RuntimeRole } from "@localhub/shared-contracts/foundation-models";
+  CapabilitySet,
+  ModelArtifact,
+  ModelProfile,
+  RuntimeRole,
+} from "@localhub/shared-contracts/foundation-models";
+import type { EngineVersionRecord } from "@localhub/shared-contracts/foundation-persistence";
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
 import type { EngineAdapter, EngineInstallResult } from "@localhub/engine-core";
 
-import { launchLlamaCppSession, type LiveLlamaCppSession } from "./session.js";
-import { toArtifactMetadata, verifyGgufFile, type GgufVerificationResult } from "./gguf.js";
+import { type GgufVerificationResult, toArtifactMetadata, verifyGgufFile } from "./gguf.js";
+import { type LiveLlamaCppSession, launchLlamaCppSession } from "./session.js";
 
 export interface IndexedModelRecord {
   artifactId: string;
@@ -42,6 +45,9 @@ export interface RegisterLocalModelOptions {
   pinned?: boolean;
   promptCacheKey?: string;
   expectedChecksumSha256?: string;
+  sourceKind?: ModelArtifact["source"]["kind"];
+  remoteUrl?: string;
+  revision?: string;
   parameterOverrides?: ModelProfile["parameterOverrides"];
 }
 
@@ -83,10 +89,7 @@ function createDeterministicId(prefix: string, base: string, checksum: string): 
 
 function humanizeFileName(filePath: string): string {
   const baseName = path.basename(filePath, path.extname(filePath));
-  return baseName
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  return baseName.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function deriveCapabilities(
@@ -261,7 +264,17 @@ export class LlamaCppModelManager {
       createdAt: existing?.artifact.createdAt ?? now,
       updatedAt: now,
       source: {
-        kind: "local",
+        kind: options.sourceKind ?? existing?.artifact.source.kind ?? "local",
+        ...((options.remoteUrl ?? existing?.artifact.source.remoteUrl)
+          ? {
+              remoteUrl: options.remoteUrl ?? existing?.artifact.source.remoteUrl ?? undefined,
+            }
+          : {}),
+        ...((options.revision ?? existing?.artifact.source.revision)
+          ? {
+              revision: options.revision ?? existing?.artifact.source.revision ?? undefined,
+            }
+          : {}),
         checksumSha256: verification.checksumSha256,
       },
       metadata: toArtifactMetadata(verification.metadata),
@@ -280,17 +293,15 @@ export class LlamaCppModelManager {
       engineType: "llama.cpp",
       pinned: options.pinned ?? existing?.profile?.pinned ?? false,
       defaultTtlMs: existing?.profile?.defaultTtlMs ?? 900_000,
-      ...(options.promptCacheKey ?? existing?.profile?.promptCacheKey
+      ...((options.promptCacheKey ?? existing?.profile?.promptCacheKey)
         ? {
             promptCacheKey:
               options.promptCacheKey ?? existing?.profile?.promptCacheKey ?? undefined,
           }
         : {}),
       role,
-      parameterOverrides:
-        options.parameterOverrides ??
-        existing?.profile?.parameterOverrides ??
-        {
+      parameterOverrides: options.parameterOverrides ??
+        existing?.profile?.parameterOverrides ?? {
           ...(verification.metadata.contextLength !== undefined
             ? { contextLength: verification.metadata.contextLength }
             : {}),
@@ -305,12 +316,7 @@ export class LlamaCppModelManager {
       artifact,
       profile,
       checksumSha256: verification.checksumSha256,
-      indexed: toIndexedRecord(
-        artifact,
-        profile,
-        existing?.loadCount ?? 0,
-        existing?.lastLoadedAt,
-      ),
+      indexed: toIndexedRecord(artifact, profile, existing?.loadCount ?? 0, existing?.lastLoadedAt),
       metadata: verification.metadata,
     };
   }
@@ -345,9 +351,7 @@ export class LlamaCppModelManager {
     return installResult;
   }
 
-  async launchRegisteredModel(
-    options: LaunchRegisteredModelOptions,
-  ): Promise<LiveLlamaCppSession> {
+  async launchRegisteredModel(options: LaunchRegisteredModelOptions): Promise<LiveLlamaCppSession> {
     const storedRecord = this.#modelsRepository.findById(options.artifactId);
     if (!storedRecord || !storedRecord.profile) {
       throw new Error(`Unknown registered model: ${options.artifactId}`);

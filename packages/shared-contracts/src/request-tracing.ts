@@ -19,6 +19,11 @@ export const requestRouteSchema = z.enum([
   "POST /control/models/preload",
   "POST /control/models/evict",
   "POST /control/models/register-local",
+  "GET /control/chat/sessions",
+  "GET /control/chat/messages",
+  "POST /control/chat/sessions",
+  "POST /control/chat/run",
+  "GET /control/observability/api-logs",
   "POST /control/system/shutdown",
   "GET /control/downloads",
   "POST /control/downloads",
@@ -45,6 +50,10 @@ export const requestTraceSchema = z.object({
   statusCode: positiveIntegerSchema.optional(),
   metadata: jsonRecordSchema.default({}),
 });
+
+export function requestTraceToApiEndpoint(route: RequestRoute): string {
+  return route.slice(route.indexOf(" ") + 1);
+}
 
 export type RequestRoute = z.infer<typeof requestRouteSchema>;
 export type RequestTrace = z.infer<typeof requestTraceSchema>;

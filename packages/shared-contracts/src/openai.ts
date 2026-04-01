@@ -30,6 +30,12 @@ export const openAiMessageSchema = z.object({
   tool_calls: z.array(openAiToolCallSchema).optional(),
 });
 
+export const openAiUsageSchema = z.object({
+  prompt_tokens: positiveIntegerSchema,
+  completion_tokens: positiveIntegerSchema,
+  total_tokens: positiveIntegerSchema,
+});
+
 export const chatCompletionsRequestSchema = z.object({
   model: nonEmptyStringSchema,
   messages: z.array(openAiMessageSchema).min(1),
@@ -56,19 +62,32 @@ export const chatCompletionChoiceSchema = z.object({
   message: openAiMessageSchema,
 });
 
+export const chatCompletionChunkChoiceSchema = z.object({
+  index: z.number().int().nonnegative(),
+  finish_reason: z.string().nullable().optional(),
+  delta: z.object({
+    role: openAiRoleSchema.optional(),
+    content: z.string().nullable().optional(),
+    tool_calls: z.array(openAiToolCallSchema).optional(),
+  }),
+});
+
 export const chatCompletionsResponseSchema = z.object({
   id: nonEmptyStringSchema,
   object: z.literal("chat.completion"),
   created: z.number().int().nonnegative(),
   model: nonEmptyStringSchema,
   choices: z.array(chatCompletionChoiceSchema),
-  usage: z
-    .object({
-      prompt_tokens: positiveIntegerSchema,
-      completion_tokens: positiveIntegerSchema,
-      total_tokens: positiveIntegerSchema,
-    })
-    .optional(),
+  usage: openAiUsageSchema.optional(),
+});
+
+export const chatCompletionsChunkSchema = z.object({
+  id: nonEmptyStringSchema,
+  object: z.literal("chat.completion.chunk"),
+  created: z.number().int().nonnegative(),
+  model: nonEmptyStringSchema,
+  choices: z.array(chatCompletionChunkChoiceSchema),
+  usage: openAiUsageSchema.optional(),
 });
 
 export const embeddingsRequestSchema = z.object({
@@ -87,9 +106,36 @@ export const embeddingsResponseSchema = z.object({
     }),
   ),
   model: nonEmptyStringSchema,
+  usage: openAiUsageSchema.optional(),
+});
+
+export const openAiModelCardSchema = z.object({
+  id: nonEmptyStringSchema,
+  object: z.literal("model"),
+  created: z.number().int().nonnegative(),
+  owned_by: nonEmptyStringSchema,
+});
+
+export const openAiModelListSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(openAiModelCardSchema),
+});
+
+export const openAiErrorResponseSchema = z.object({
+  error: z.object({
+    message: nonEmptyStringSchema,
+    type: nonEmptyStringSchema.optional(),
+    param: nonEmptyStringSchema.nullable().optional(),
+    code: z.union([nonEmptyStringSchema, z.number().int()]).nullable().optional(),
+  }),
 });
 
 export type ChatCompletionsRequest = z.infer<typeof chatCompletionsRequestSchema>;
 export type ChatCompletionsResponse = z.infer<typeof chatCompletionsResponseSchema>;
+export type ChatCompletionsChunk = z.infer<typeof chatCompletionsChunkSchema>;
 export type EmbeddingsRequest = z.infer<typeof embeddingsRequestSchema>;
 export type EmbeddingsResponse = z.infer<typeof embeddingsResponseSchema>;
+export type OpenAiModelCard = z.infer<typeof openAiModelCardSchema>;
+export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
+export type OpenAiErrorResponse = z.infer<typeof openAiErrorResponseSchema>;
+export type OpenAiToolCall = z.infer<typeof openAiToolCallSchema>;

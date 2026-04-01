@@ -28,6 +28,9 @@
       "@localhub/shared-contracts/foundation-request-tracing": [
         "packages/shared-contracts/src/request-tracing.ts"
       ],
+      "@localhub/shared-contracts/foundation-serialization": [
+        "packages/shared-contracts/src/serialization.ts"
+      ],
       "@localhub/shared-contracts/foundation-runtime": ["packages/shared-contracts/src/runtime.ts"],
       "@localhub/platform": ["packages/platform/src/index.ts"],
       "@localhub/db": ["packages/db/src/index.ts"],

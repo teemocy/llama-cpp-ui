@@ -1,8 +1,10 @@
 import type {
+  ApiLogRecord,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
 } from "@localhub/shared-contracts";
+import { useEffect, useState } from "react";
 
 type DashboardScreenProps = {
   shellState: DesktopShellState;
@@ -10,14 +12,23 @@ type DashboardScreenProps = {
   events: GatewayEvent[];
 };
 
-const findMetric = (events: GatewayEvent[], key: string): string => {
+const findNumericMetric = (events: GatewayEvent[], key: string): number | null => {
   const event = events.find((entry) => entry.type === "METRICS_TICK");
   const payload = event?.payload as Record<string, unknown> | undefined;
   const value = payload?.[key];
-  return typeof value === "number" ? String(value) : "Pending";
+  return typeof value === "number" ? value : null;
+};
+
+const formatRate = (value: number | undefined): string => {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "Pending";
+  }
+
+  return `${value.toFixed(2)} tok/s`;
 };
 
 export function DashboardScreen({ shellState, health, events }: DashboardScreenProps) {
+  const [apiLogs, setApiLogs] = useState<ApiLogRecord[]>([]);
   const latestTrace = events.find((event) => event.type === "REQUEST_TRACE");
   const latestTracePayload = latestTrace?.payload as Record<string, unknown> | undefined;
   const healthRecord = health as Record<string, unknown> | null;
@@ -33,15 +44,42 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
       : typeof healthRecord?.loadedModelCount === "number"
         ? healthRecord.loadedModelCount
         : 0;
+  const runtimeLogs = events.filter((event) => event.type === "LOG_STREAM").slice(0, 10);
+  const latestApiLog = apiLogs[0];
+  const residentMemoryBytes = findNumericMetric(events, "residentMemoryBytes");
+  const gpuMemoryBytes = findNumericMetric(events, "gpuMemoryBytes");
+
+  useEffect(() => {
+    if (shellState.phase !== "connected") {
+      return;
+    }
+
+    let cancelled = false;
+    const refreshLogs = async () => {
+      const response = await window.desktopApi.gateway.listApiLogs(30);
+      if (!cancelled) {
+        setApiLogs(response.data);
+      }
+    };
+
+    void refreshLogs();
+    const timer = window.setInterval(() => {
+      void refreshLogs();
+    }, 4_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [shellState.phase]);
 
   return (
     <section className="screen-grid">
       <article className="hero-card">
         <span className="section-label">Runtime overview</span>
-        <h3>Bootable shell with mocked lifecycle data</h3>
+        <h3>Live gateway observability</h3>
         <p>
-          Stage 1 is focused on proving the desktop contract: window lifecycle, tray behavior,
-          preload IPC, and transport wiring against a safe mock.
+          Track request traces, gateway logs, and token metrics while model runtime requests are in
+          flight.
         </p>
       </article>
 
@@ -59,8 +97,8 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
 
       <article className="info-card">
         <span className="section-label">Resident memory</span>
-        <strong>{findMetric(events, "residentMemoryBytes")} bytes</strong>
-        <p>Metric cards are already driven by the shared event envelope.</p>
+        <strong>{residentMemoryBytes !== null ? `${residentMemoryBytes} bytes` : "Pending"}</strong>
+        <p>GPU memory: {gpuMemoryBytes !== null ? `${gpuMemoryBytes} bytes` : "Pending"}</p>
       </article>
 
       <article className="info-card">
@@ -72,12 +110,53 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
       </article>
 
       <article className="wide-card">
-        <span className="section-label">Stage boundary</span>
-        <h3>Ready for real feature slices</h3>
-        <p>
-          Placeholder screens, navigation, and transport hooks are stable enough to receive real
-          model-management and chat UX in the next stages.
-        </p>
+        <span className="section-label">API performance</span>
+        <h3>Recent completion stats</h3>
+        {latestApiLog ? (
+          <dl className="meta-grid">
+            <div>
+              <dt>Endpoint</dt>
+              <dd>{latestApiLog.endpoint}</dd>
+            </div>
+            <div>
+              <dt>TTFT</dt>
+              <dd>
+                {latestApiLog.ttftMs !== undefined ? `${latestApiLog.ttftMs} ms` : "Pending"}
+              </dd>
+            </div>
+            <div>
+              <dt>Tokens/s</dt>
+              <dd>{formatRate(latestApiLog.tokensPerSecond)}</dd>
+            </div>
+            <div>
+              <dt>Total duration</dt>
+              <dd>
+                {latestApiLog.totalDurationMs !== undefined
+                  ? `${latestApiLog.totalDurationMs} ms`
+                  : "Pending"}
+              </dd>
+            </div>
+          </dl>
+        ) : (
+          <p>No API logs yet. Run chat requests to populate this panel.</p>
+        )}
+      </article>
+
+      <article className="wide-card">
+        <span className="section-label">Live log console</span>
+        <h3>Gateway event stream</h3>
+        <div className="log-console">
+          {runtimeLogs.length === 0 ? (
+            <p>Waiting for runtime log events.</p>
+          ) : (
+            runtimeLogs.map((event) => (
+              <p key={`${event.traceId}-${event.ts}`}>
+                [{new Date(event.ts).toLocaleTimeString()}]{" "}
+                {(event.payload as { message?: string }).message ?? "Gateway log"}
+              </p>
+            ))
+          )}
+        </div>
       </article>
     </section>
   );

@@ -1,8 +1,19 @@
 import type {
+  ChatSession,
+  DesktopApiLogList,
+  DesktopChatMessageList,
+  DesktopChatRunRequest,
+  DesktopChatRunResponse,
+  DesktopChatSessionList,
+  DesktopChatSessionUpsertRequest,
+  DesktopDownloadActionResponse,
+  DesktopDownloadCreateRequest,
+  DesktopDownloadList,
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelLibrary,
+  DesktopProviderSearchResult,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -35,6 +46,16 @@ type DesktopApi = {
     registerLocalModel(payload: DesktopLocalModelImportRequest): Promise<DesktopLocalModelImportResponse>;
     preloadModel(modelId: string): Promise<void>;
     evictModel(modelId: string): Promise<void>;
+    listChatSessions(): Promise<DesktopChatSessionList>;
+    listChatMessages(sessionId: string): Promise<DesktopChatMessageList>;
+    upsertChatSession(payload: DesktopChatSessionUpsertRequest): Promise<ChatSession>;
+    runChat(payload: DesktopChatRunRequest): Promise<DesktopChatRunResponse>;
+    listApiLogs(limit?: number): Promise<DesktopApiLogList>;
+    searchCatalog(query: string): Promise<DesktopProviderSearchResult>;
+    listDownloads(): Promise<DesktopDownloadList>;
+    createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
+    pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
     subscribeEvents(listener: (event: GatewayEvent) => void): Unsubscribe;
     openModelFileDialog(): Promise<FileDialogResult>;
   };

@@ -2,20 +2,17 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  EngineVersionsRepository,
-  ModelsRepository,
-  createTestDatabase,
-} from "@localhub/db";
+import { EngineVersionsRepository, ModelsRepository, createTestDatabase } from "@localhub/db";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createLlamaCppAdapter } from "./index.js";
 import { computeFileSha256, sniffGgufFile, verifyGgufFile } from "./gguf.js";
+import { createLlamaCppAdapter } from "./index.js";
 import { LlamaCppModelManager } from "./model-manager.js";
 
 const tempDirs: string[] = [];
 const cleanups: Array<() => void> = [];
-const activeSessions: Array<Awaited<ReturnType<LlamaCppModelManager["launchRegisteredModel"]>>> = [];
+const activeSessions: Array<Awaited<ReturnType<LlamaCppModelManager["launchRegisteredModel"]>>> =
+  [];
 
 enum TestGgufValueType {
   Uint32 = 4,

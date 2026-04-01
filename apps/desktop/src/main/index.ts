@@ -131,6 +131,30 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayEvictModel, (_event, modelId: string) =>
     gatewayManager.evictModel(modelId),
   );
+  ipcMain.handle(IPC_CHANNELS.gatewayListChatSessions, () => gatewayManager.listChatSessions());
+  ipcMain.handle(IPC_CHANNELS.gatewayListChatMessages, (_event, sessionId: string) =>
+    gatewayManager.listChatMessages(sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayUpsertChatSession, (_event, payload) =>
+    gatewayManager.upsertChatSession(payload),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayRunChat, (_event, payload) => gatewayManager.runChat(payload));
+  ipcMain.handle(IPC_CHANNELS.gatewayListApiLogs, (_event, limit?: number) =>
+    gatewayManager.listApiLogs(limit),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewaySearchCatalog, (_event, query: string) =>
+    gatewayManager.searchCatalog(query),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayListDownloads, () => gatewayManager.listDownloads());
+  ipcMain.handle(IPC_CHANNELS.gatewayCreateDownload, (_event, payload) =>
+    gatewayManager.createDownload(payload),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayPauseDownload, (_event, id: string) =>
+    gatewayManager.pauseDownload(id),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayResumeDownload, (_event, id: string) =>
+    gatewayManager.resumeDownload(id),
+  );
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {

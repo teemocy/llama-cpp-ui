@@ -1,5 +1,6 @@
 export * from "./common.js";
 export * from "./config.js";
+export * from "./contracts/providers.js";
 export * from "./contracts/layout.js";
 export * from "./desktop.js";
 export * from "./events.js";
@@ -8,3 +9,4 @@ export * from "./openai.js";
 export * from "./persistence.js";
 export * from "./request-tracing.js";
 export * from "./runtime.js";
+export * from "./serialization.js";

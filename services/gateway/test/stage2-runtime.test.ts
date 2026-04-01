@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  ChatRepository,
   ModelsRepository,
   fixtureModelArtifact,
   fixtureModelProfile,
@@ -86,6 +87,26 @@ interface Stage2Fixture {
 }
 
 const fixtures: Stage2Fixture[] = [];
+const embeddingsModelArtifact = {
+  ...fixtureModelArtifact,
+  id: "model_bge_small_embed",
+  name: "BGE Small Embed",
+  localPath: "/models/bge-small-embed.gguf",
+  capabilities: {
+    ...fixtureModelArtifact.capabilities,
+    chat: false,
+    embeddings: true,
+    tools: false,
+    promptCache: false,
+  },
+};
+const embeddingsModelProfile = {
+  ...fixtureModelProfile,
+  id: "profile_bge_small_embed_default",
+  modelId: embeddingsModelArtifact.id,
+  displayName: "BGE Small Embed",
+  role: "embeddings" as const,
+};
 
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -115,8 +136,10 @@ async function createStage2Fixture(): Promise<Stage2Fixture> {
   });
   const models = new ModelsRepository(seeded.database);
   const seededArtifactPath = path.join(appPaths.modelsDir, "fixture-qwen25-coder.gguf");
+  const seededEmbeddingPath = path.join(appPaths.modelsDir, "fixture-bge-small-embed.gguf");
 
   await writeSampleGgufFile(seededArtifactPath);
+  await writeSampleGgufFile(seededEmbeddingPath);
 
   models.save(
     {
@@ -124,6 +147,13 @@ async function createStage2Fixture(): Promise<Stage2Fixture> {
       localPath: seededArtifactPath,
     },
     fixtureModelProfile,
+  );
+  models.save(
+    {
+      ...embeddingsModelArtifact,
+      localPath: seededEmbeddingPath,
+    },
+    embeddingsModelProfile,
   );
   seeded.database.close();
 
@@ -186,11 +216,11 @@ describe("gateway stage 2 runtime", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       object: "list",
-      data: [
+      data: expect.arrayContaining([
         expect.objectContaining({
           id: fixtureModelArtifact.id,
         }),
-      ],
+      ]),
     });
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
@@ -472,6 +502,190 @@ describe("gateway stage 2 runtime", () => {
         { type: "REQUEST_TRACE", route: "POST /control/models/evict" },
       ]),
     );
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("serves non-streaming chat completions and persists api logs", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "Explain the gateway stage." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      object: "chat.completion",
+      model: fixtureModelArtifact.id,
+      choices: [
+        expect.objectContaining({
+          finish_reason: "stop",
+          message: expect.objectContaining({
+            role: "assistant",
+          }),
+        }),
+      ],
+      usage: expect.objectContaining({
+        prompt_tokens: expect.any(Number),
+        completion_tokens: expect.any(Number),
+      }),
+    });
+
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const chat = new ChatRepository(reopened.database);
+    const logs = chat.listRecentApiLogs();
+    reopened.database.close();
+
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          endpoint: "/v1/chat/completions",
+          modelId: fixtureModelArtifact.id,
+          statusCode: 200,
+        }),
+      ]),
+    );
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("streams chat completions with SSE framing and done sentinel", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        stream: true,
+        messages: [{ role: "user", content: "Stream a reply." }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("data: ");
+    expect(response.body).toContain("data: [DONE]");
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("passes tool calls through without executing them", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: fixtureModelArtifact.id,
+        messages: [{ role: "user", content: "Use a tool for this." }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "lookup_weather",
+              parameters: { type: "object" },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      choices: [
+        expect.objectContaining({
+          finish_reason: "tool_calls",
+          message: expect.objectContaining({
+            role: "assistant",
+            tool_calls: [
+              expect.objectContaining({
+                function: expect.objectContaining({
+                  name: "lookup_weather",
+                }),
+              }),
+            ],
+          }),
+        }),
+      ],
+    });
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("serves embeddings through the public api for embedding-capable models", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const response = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/embeddings",
+      headers: {
+        authorization: "Bearer public-secret-stage2",
+      },
+      payload: {
+        model: embeddingsModelArtifact.id,
+        input: ["hello", "world"],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      object: "list",
+      model: embeddingsModelArtifact.id,
+      data: [
+        expect.objectContaining({
+          object: "embedding",
+          index: 0,
+          embedding: expect.any(Array),
+        }),
+        expect.objectContaining({
+          object: "embedding",
+          index: 1,
+          embedding: expect.any(Array),
+        }),
+      ],
+    });
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });

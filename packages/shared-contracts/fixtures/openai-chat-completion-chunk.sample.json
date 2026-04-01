@@ -1,0 +1,15 @@
+{
+  "id": "chatcmpl_local_123",
+  "object": "chat.completion.chunk",
+  "created": 1774958400,
+  "model": "model_qwen25_coder",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "content": "export function add"
+      }
+    }
+  ]
+}

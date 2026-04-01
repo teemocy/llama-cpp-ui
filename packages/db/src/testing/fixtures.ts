@@ -10,6 +10,7 @@ import type {
   DownloadTask,
   EngineVersionRecord,
 } from "@localhub/shared-contracts/foundation-persistence";
+import type { RequestTrace } from "@localhub/shared-contracts/foundation-request-tracing";
 
 export const FIXTURE_TIMESTAMP = "2026-03-31T12:00:00.000Z";
 
@@ -146,6 +147,32 @@ export const fixtureApiLog: ApiLogRecord = {
   createdAt: FIXTURE_TIMESTAMP,
 };
 
+export const fixtureRequestTrace: RequestTrace = {
+  traceId: "trace_stage3_123456",
+  requestId: "req_stage3_123456",
+  route: "POST /v1/chat/completions",
+  method: "POST",
+  modelId: fixtureModelArtifact.id,
+  runtimeKey: {
+    modelId: fixtureModelArtifact.id,
+    engineType: "llama.cpp",
+    role: "chat",
+    configHash: "cfg_qwen25_coder_default",
+  },
+  remoteAddress: "127.0.0.1",
+  receivedAt: FIXTURE_TIMESTAMP,
+  completedAt: "2026-03-31T12:00:01.000Z",
+  durationMs: 1000,
+  ttftMs: 150,
+  promptTokens: 12,
+  completionTokens: 23,
+  statusCode: 200,
+  metadata: {
+    plane: "public",
+    stream: true,
+  },
+};
+
 export interface RepositoryFixtureSet {
   modelArtifact: ModelArtifact;
   modelProfile: ModelProfile;
@@ -156,6 +183,7 @@ export interface RepositoryFixtureSet {
   chatSession: ChatSession;
   chatMessage: ChatMessage;
   apiLog: ApiLogRecord;
+  requestTrace: RequestTrace;
 }
 
 function cloneFixture<T>(value: T): T {
@@ -173,5 +201,6 @@ export function createRepositoryFixtureSet(): RepositoryFixtureSet {
     chatSession: cloneFixture(fixtureChatSession),
     chatMessage: cloneFixture(fixtureChatMessage),
     apiLog: cloneFixture(fixtureApiLog),
+    requestTrace: cloneFixture(fixtureRequestTrace),
   };
 }

@@ -64,6 +64,46 @@ export class DownloadTasksRepository {
       );
   }
 
+  findById(id: string): DownloadTask | undefined {
+    const row = this.#database.prepare("SELECT * FROM download_tasks WHERE id = ?").get(id) as
+      | {
+          id: string;
+          model_id: string | null;
+          provider: string;
+          url: string;
+          total_bytes: number | null;
+          downloaded_bytes: number;
+          status: DownloadTask["status"];
+          checksum_sha256: string | null;
+          error_message: string | null;
+          metadata_json: string;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+
+    return row ? this.parseRow(row) : undefined;
+  }
+
+  list(): DownloadTask[] {
+    return (
+      this.#database.prepare("SELECT * FROM download_tasks ORDER BY updated_at DESC").all() as Array<{
+        id: string;
+        model_id: string | null;
+        provider: string;
+        url: string;
+        total_bytes: number | null;
+        downloaded_bytes: number;
+        status: DownloadTask["status"];
+        checksum_sha256: string | null;
+        error_message: string | null;
+        metadata_json: string;
+        created_at: string;
+        updated_at: string;
+      }>
+    ).map((row) => this.parseRow(row));
+  }
+
   listActive(): DownloadTask[] {
     return (
       this.#database
@@ -89,21 +129,36 @@ export class DownloadTasksRepository {
         created_at: string;
         updated_at: string;
       }>
-    ).map((row) =>
-      downloadTaskSchema.parse({
-        id: row.id,
-        modelId: row.model_id ?? undefined,
-        provider: row.provider,
-        url: row.url,
-        totalBytes: row.total_bytes ?? undefined,
-        downloadedBytes: row.downloaded_bytes,
-        status: row.status,
-        checksumSha256: row.checksum_sha256 ?? undefined,
-        errorMessage: row.error_message ?? undefined,
-        metadata: parseJson(row.metadata_json, {}),
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }),
-    );
+    ).map((row) => this.parseRow(row));
+  }
+
+  private parseRow(row: {
+    id: string;
+    model_id: string | null;
+    provider: string;
+    url: string;
+    total_bytes: number | null;
+    downloaded_bytes: number;
+    status: DownloadTask["status"];
+    checksum_sha256: string | null;
+    error_message: string | null;
+    metadata_json: string;
+    created_at: string;
+    updated_at: string;
+  }): DownloadTask {
+    return downloadTaskSchema.parse({
+      id: row.id,
+      modelId: row.model_id ?? undefined,
+      provider: row.provider,
+      url: row.url,
+      totalBytes: row.total_bytes ?? undefined,
+      downloadedBytes: row.downloaded_bytes,
+      status: row.status,
+      checksumSha256: row.checksum_sha256 ?? undefined,
+      errorMessage: row.error_message ?? undefined,
+      metadata: parseJson(row.metadata_json, {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
   }
 }

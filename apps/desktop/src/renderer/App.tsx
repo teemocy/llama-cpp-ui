@@ -12,6 +12,7 @@ import { startTransition, useEffect, useState } from "react";
 import { HashRouter, NavLink, Route, Routes } from "react-router-dom";
 import { ChatScreen } from "./screens/ChatScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
+import { DownloadsScreen } from "./screens/DownloadsScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 
@@ -34,6 +35,7 @@ const initialShellState: DesktopShellState = {
 const navItems = [
   { to: "/", label: "Overview" },
   { to: "/models", label: "Model Library" },
+  { to: "/downloads", label: "Downloads" },
   { to: "/chat", label: "Chat Sandbox" },
   { to: "/settings", label: "Settings" },
 ] as const;
@@ -230,9 +232,9 @@ export function App() {
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand-card">
-            <span className="brand-eyebrow">Stage 2 Runtime Slice</span>
+            <span className="brand-eyebrow">Stage 3 User Flows</span>
             <h1>Local LLM Hub</h1>
-            <p>Real local model registration, metadata-driven details, and live preload or evict controls.</p>
+            <p>Chat, downloads, and observability are now wired into the desktop control plane.</p>
           </div>
 
           <nav className="nav-stack">
@@ -316,6 +318,7 @@ export function App() {
                 />
               }
             />
+            <Route path="/downloads" element={<DownloadsScreen shellState={shellState} />} />
             <Route
               path="/chat"
               element={<ChatScreen models={modelSummaries} shellState={shellState} />}
