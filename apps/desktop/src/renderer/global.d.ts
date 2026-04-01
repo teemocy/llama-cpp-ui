@@ -1,4 +1,8 @@
 import type {
+  DesktopEngineList,
+  DesktopLocalModelImportRequest,
+  DesktopLocalModelImportResponse,
+  DesktopModelLibrary,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -25,7 +29,12 @@ type DesktopApi = {
   };
   gateway: {
     listModels(): Promise<PublicModelList>;
+    listModelLibrary(): Promise<DesktopModelLibrary>;
     getHealth(): Promise<GatewayHealthSnapshot>;
+    listEngines(): Promise<DesktopEngineList>;
+    registerLocalModel(payload: DesktopLocalModelImportRequest): Promise<DesktopLocalModelImportResponse>;
+    preloadModel(modelId: string): Promise<void>;
+    evictModel(modelId: string): Promise<void>;
     subscribeEvents(listener: (event: GatewayEvent) => void): Unsubscribe;
     openModelFileDialog(): Promise<FileDialogResult>;
   };

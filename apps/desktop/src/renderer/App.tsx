@@ -1,4 +1,8 @@
 import type {
+  DesktopEngineRecord,
+  DesktopLocalModelImportRequest,
+  DesktopLocalModelImportResponse,
+  DesktopModelRecord,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -27,6 +31,13 @@ const initialShellState: DesktopShellState = {
   lastEventAt: null,
 };
 
+const navItems = [
+  { to: "/", label: "Overview" },
+  { to: "/models", label: "Model Library" },
+  { to: "/chat", label: "Chat Sandbox" },
+  { to: "/settings", label: "Settings" },
+] as const;
+
 const formatClock = (value?: string | null): string => {
   if (!value) {
     return "Not yet";
@@ -38,20 +49,52 @@ const formatClock = (value?: string | null): string => {
   });
 };
 
-const navItems = [
-  { to: "/", label: "Overview" },
-  { to: "/models", label: "Model Library" },
-  { to: "/chat", label: "Chat Sandbox" },
-  { to: "/settings", label: "Settings" },
-] as const;
+const formatBytes = (value: number): string => {
+  if (value <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let nextValue = value;
+  let unitIndex = 0;
+
+  while (nextValue >= 1024 && unitIndex < units.length - 1) {
+    nextValue /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${nextValue >= 10 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
+};
+
+const describeModel = (model: DesktopModelRecord): string => {
+  const facets = [model.role, model.format, model.architecture, model.quantization]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.replace(/-/g, " "));
+
+  return facets.length > 0 ? facets.join(" • ") : "Registered local model.";
+};
+
+const toModelSummary = (model: DesktopModelRecord): ModelSummary => ({
+  id: model.id,
+  name: model.displayName,
+  engine: model.engineType,
+  state: model.state,
+  sizeLabel: formatBytes(model.sizeBytes),
+  tags: model.tags,
+  ...(model.contextLength !== undefined ? { contextLength: model.contextLength } : {}),
+  description: describeModel(model),
+  ...(model.lastUsedAt ? { lastUsedAt: model.lastUsedAt } : {}),
+});
 
 export function App() {
   const [shellState, setShellState] = useState(initialShellState);
-  const [models, setModels] = useState<ModelSummary[]>([]);
+  const [modelLibrary, setModelLibrary] = useState<DesktopModelRecord[]>([]);
+  const [engines, setEngines] = useState<DesktopEngineRecord[]>([]);
   const [health, setHealth] = useState<GatewayHealthSnapshot | null>(null);
   const [paths, setPaths] = useState<DesktopSystemPaths | null>(null);
   const [events, setEvents] = useState<GatewayEvent[]>([]);
-  const [pickedFiles, setPickedFiles] = useState<string[]>([]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -78,6 +121,12 @@ export function App() {
       startTransition(() => {
         setEvents((current) => [event, ...current].slice(0, 14));
       });
+
+      if (event.type === "MODEL_STATE_CHANGED") {
+        startTransition(() => {
+          setRefreshKey((current) => current + 1);
+        });
+      }
     });
 
     return () => {
@@ -95,13 +144,15 @@ export function App() {
     let cancelled = false;
 
     const refresh = async () => {
-      const [modelList, healthSnapshot] = await Promise.all([
-        window.desktopApi.gateway.listModels(),
+      const [library, engineList, healthSnapshot] = await Promise.all([
+        window.desktopApi.gateway.listModelLibrary(),
+        window.desktopApi.gateway.listEngines(),
         window.desktopApi.gateway.getHealth(),
       ]);
 
       if (!cancelled) {
-        setModels(modelList.data);
+        setModelLibrary(library.data);
+        setEngines(engineList.data);
         setHealth(healthSnapshot);
       }
     };
@@ -116,19 +167,62 @@ export function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [shellState.phase]);
+  }, [refreshKey, shellState.phase]);
+
+  useEffect(() => {
+    if (modelLibrary.length === 0) {
+      setSelectedModelId(null);
+      return;
+    }
+
+    setSelectedModelId((current) =>
+      current && modelLibrary.some((model) => model.id === current)
+        ? current
+        : modelLibrary[0]!.id,
+    );
+  }, [modelLibrary]);
 
   const latestMetrics = events.find((event) => event.type === "METRICS_TICK");
   const latestTrace = events.find((event) => event.type === "REQUEST_TRACE");
   const latestMetricsPayload = latestMetrics?.payload as Record<string, unknown> | undefined;
   const latestTracePayload = latestTrace?.payload as Record<string, unknown> | undefined;
+  const modelSummaries = modelLibrary.map((model) => toModelSummary(model));
+  const activeEngineCount = engines.filter((engine) => engine.active).length;
 
-  const pickLocalModel = async () => {
+  const requestRefresh = () => {
+    startTransition(() => {
+      setRefreshKey((current) => current + 1);
+    });
+  };
+
+  const pickLocalModel = async (): Promise<string | null> => {
     const result = await window.desktopApi.gateway.openModelFileDialog();
-
-    if (!result.canceled) {
-      setPickedFiles(result.filePaths);
+    if (result.canceled) {
+      return null;
     }
+
+    return result.filePaths[0] ?? null;
+  };
+
+  const registerLocalModel = async (
+    payload: DesktopLocalModelImportRequest,
+  ): Promise<DesktopLocalModelImportResponse> => {
+    const result = await window.desktopApi.gateway.registerLocalModel(payload);
+
+    setSelectedModelId(result.model.id);
+    requestRefresh();
+
+    return result;
+  };
+
+  const preloadModel = async (modelId: string): Promise<void> => {
+    await window.desktopApi.gateway.preloadModel(modelId);
+    requestRefresh();
+  };
+
+  const evictModel = async (modelId: string): Promise<void> => {
+    await window.desktopApi.gateway.evictModel(modelId);
+    requestRefresh();
   };
 
   return (
@@ -136,9 +230,9 @@ export function App() {
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand-card">
-            <span className="brand-eyebrow">Stage 1 Shell</span>
+            <span className="brand-eyebrow">Stage 2 Runtime Slice</span>
             <h1>Local LLM Hub</h1>
-            <p>Electron tray shell, mocked gateway transport, and the first renderer scaffold.</p>
+            <p>Real local model registration, metadata-driven details, and live preload or evict controls.</p>
           </div>
 
           <nav className="nav-stack">
@@ -165,7 +259,7 @@ export function App() {
           </section>
 
           <section className="side-panel">
-            <span className="section-label">Metrics pulse</span>
+            <span className="section-label">Runtime pulse</span>
             <strong>
               {typeof latestMetricsPayload?.activeWorkers === "number"
                 ? `${latestMetricsPayload.activeWorkers} active worker slots`
@@ -174,7 +268,7 @@ export function App() {
             <p>
               {typeof latestTracePayload?.route === "string"
                 ? `Latest traced route: ${latestTracePayload.route}.`
-                : "Telemetry will begin once the control stream is attached."}
+                : "The control plane will trace lifecycle requests once the first action runs."}
             </p>
           </section>
         </aside>
@@ -191,8 +285,12 @@ export function App() {
                 <strong>{formatClock(shellState.startedAt)}</strong>
               </div>
               <div>
-                <span className="section-label">Tray mode</span>
-                <strong>Close hides to tray</strong>
+                <span className="section-label">Registered models</span>
+                <strong>{modelLibrary.length}</strong>
+              </div>
+              <div>
+                <span className="section-label">Active engines</span>
+                <strong>{activeEngineCount}</strong>
               </div>
             </div>
           </header>
@@ -206,14 +304,22 @@ export function App() {
               path="/models"
               element={
                 <ModelsScreen
-                  models={models}
-                  onImportModel={pickLocalModel}
-                  pickedFiles={pickedFiles}
+                  engines={engines}
+                  models={modelLibrary}
+                  onEvictModel={evictModel}
+                  onPickImportFile={pickLocalModel}
+                  onPreloadModel={preloadModel}
+                  onRegisterModel={registerLocalModel}
+                  onSelectModel={setSelectedModelId}
+                  selectedModelId={selectedModelId}
                   shellState={shellState}
                 />
               }
             />
-            <Route path="/chat" element={<ChatScreen models={models} shellState={shellState} />} />
+            <Route
+              path="/chat"
+              element={<ChatScreen models={modelSummaries} shellState={shellState} />}
+            />
             <Route
               path="/settings"
               element={<SettingsScreen paths={paths} shellState={shellState} />}
@@ -226,8 +332,8 @@ export function App() {
             <span className="section-label">Event feed</span>
             <h3>Shared envelope</h3>
             <p>
-              The renderer is already consuming the stage event taxonomy without reaching into
-              gateway internals.
+              Runtime state, desktop actions, and control-plane traces all flow through the same
+              shared event contract.
             </p>
           </div>
 

@@ -1,4 +1,8 @@
 import type {
+  DesktopEngineList,
+  DesktopLocalModelImportRequest,
+  DesktopLocalModelImportResponse,
+  DesktopModelLibrary,
   DesktopShellState,
   GatewayEvent,
   GatewayHealthSnapshot,
@@ -36,8 +40,18 @@ const api = {
   gateway: {
     listModels: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListModels) as Promise<PublicModelList>,
+    listModelLibrary: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListModelLibrary) as Promise<DesktopModelLibrary>,
     getHealth: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayGetHealth) as Promise<GatewayHealthSnapshot>,
+    listEngines: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayListEngines) as Promise<DesktopEngineList>,
+    registerLocalModel: (payload: DesktopLocalModelImportRequest) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayRegisterLocalModel, payload) as Promise<DesktopLocalModelImportResponse>,
+    preloadModel: (modelId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayPreloadModel, modelId) as Promise<void>,
+    evictModel: (modelId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayEvictModel, modelId) as Promise<void>,
     subscribeEvents: (listener: Listener<GatewayEvent>) =>
       subscribe(IPC_CHANNELS.gatewayEvent, listener),
     openModelFileDialog: () =>
