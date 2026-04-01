@@ -90,6 +90,7 @@ export function loadGatewayConfig(
     pickNumber(env.LOCAL_LLM_HUB_REQUEST_TRACE_RETENTION_DAYS),
   );
 
+  // Stage 2 freeze: shared config precedence is defaults < file < environment overrides.
   const merged = gatewayConfigRecordSchema.parse({
     ...gatewayConfigDefaults,
     ...fileValues,
@@ -138,6 +139,7 @@ export function loadDesktopConfig(
     env.LOCAL_LLM_HUB_LOG_LEVEL as DesktopConfigRecord["logLevel"] | undefined,
   );
 
+  // Stage 2 freeze: desktop config follows the same defaults < file < env merge order.
   const merged = desktopConfigRecordSchema.parse({
     ...desktopConfigDefaults,
     ...fileValues,

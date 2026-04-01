@@ -27,7 +27,8 @@ export const runtimeKeySchema = z.object({
 export const runtimeKeyStringSchema = z
   .string()
   .min(8)
-  .regex(/^[A-Za-z0-9:_-]+$/);
+  // Engine runtime directories preserve dots in engine identifiers such as `llama.cpp`.
+  .regex(/^[A-Za-z0-9:._-]+$/);
 
 export const workerStateSchema = z.object({
   runtimeKey: runtimeKeySchema,

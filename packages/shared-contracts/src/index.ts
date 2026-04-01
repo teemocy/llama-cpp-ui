@@ -1,5 +1,6 @@
 export * from "./common.js";
 export * from "./config.js";
+export * from "./contracts/layout.js";
 export * from "./desktop.js";
 export * from "./events.js";
 export * from "./models.js";

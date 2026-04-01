@@ -3,9 +3,10 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  LOCAL_ARTIFACT_LAYOUT_SPEC,
   type RuntimeEnvironment,
   runtimeEnvironmentSchema,
-} from "@localhub/shared-contracts/foundation-common";
+} from "@localhub/shared-contracts";
 
 const APP_SUPPORT_SLUG = "local-llm-hub";
 const APP_SUPPORT_NAME = "Local LLM Hub";
@@ -28,7 +29,10 @@ export interface AppPaths {
   downloadsDir: string;
   enginesDir: string;
   modelsDir: string;
+  checksumsDir: string;
+  promptCachesDir: string;
   promptCacheDir: string;
+  tempDir: string;
   gatewayConfigFile: string;
   desktopConfigFile: string;
   discoveryFile: string;
@@ -68,10 +72,27 @@ export function resolveAppPaths(options: ResolveAppPathsOptions = {}): AppPaths 
   const logsDir = path.join(supportRoot, "logs");
   const runtimeDir = path.join(supportRoot, "runtime");
   const dataDir = path.join(supportRoot, "data");
-  const downloadsDir = path.join(supportRoot, "downloads");
-  const enginesDir = path.join(supportRoot, "engines");
-  const modelsDir = path.join(supportRoot, "models");
-  const promptCacheDir = path.join(supportRoot, "prompt-cache");
+  const downloadsDir = path.join(
+    supportRoot,
+    LOCAL_ARTIFACT_LAYOUT_SPEC.directories.downloads.relativePath,
+  );
+  const enginesDir = path.join(
+    supportRoot,
+    LOCAL_ARTIFACT_LAYOUT_SPEC.directories.engines.relativePath,
+  );
+  const modelsDir = path.join(
+    supportRoot,
+    LOCAL_ARTIFACT_LAYOUT_SPEC.directories.models.relativePath,
+  );
+  const checksumsDir = path.join(
+    supportRoot,
+    LOCAL_ARTIFACT_LAYOUT_SPEC.directories.checksums.relativePath,
+  );
+  const promptCachesDir = path.join(
+    supportRoot,
+    LOCAL_ARTIFACT_LAYOUT_SPEC.directories.promptCaches.relativePath,
+  );
+  const tempDir = path.join(supportRoot, LOCAL_ARTIFACT_LAYOUT_SPEC.directories.temp.relativePath);
 
   return {
     environment,
@@ -83,7 +104,11 @@ export function resolveAppPaths(options: ResolveAppPathsOptions = {}): AppPaths 
     downloadsDir,
     enginesDir,
     modelsDir,
-    promptCacheDir,
+    checksumsDir,
+    promptCachesDir,
+    // Backward-compatible alias while downstream code migrates to the shared Stage 2 layout names.
+    promptCacheDir: promptCachesDir,
+    tempDir,
     gatewayConfigFile: path.join(configDir, "gateway.json"),
     desktopConfigFile: path.join(configDir, "desktop.json"),
     discoveryFile: path.join(runtimeDir, "gateway-discovery.json"),
@@ -101,7 +126,10 @@ export function ensureAppPaths(paths: AppPaths): AppPaths {
     paths.downloadsDir,
     paths.enginesDir,
     paths.modelsDir,
+    paths.checksumsDir,
+    paths.promptCachesDir,
     paths.promptCacheDir,
+    paths.tempDir,
   ]) {
     mkdirSync(directory, { recursive: true });
   }

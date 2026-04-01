@@ -22,7 +22,7 @@
 
 - Shared contract changes must be additive by default and require Thread 1 review before downstream usage expands.
 - Database migrations are forward-only. Existing migration files are immutable after merge; follow-up fixes must ship as new numbered migrations.
-- Config precedence is fixed as defaults < config file < environment overrides.
+- Config precedence is fixed as defaults < config file < environment overrides. See `docs/config-precedence.md` for the Stage 2 freeze and override tables.
 - Runtime precedence remains engine defaults < GGUF metadata < saved model profile overrides < allowed per-request overrides.
 - Shared filesystem layout changes must preserve deterministic paths for discovery files, logs, downloads, engines, and prompt caches.
 

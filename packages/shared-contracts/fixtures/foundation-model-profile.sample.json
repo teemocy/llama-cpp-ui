@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "profile_qwen25_coder_default",
+  "modelId": "model_qwen25_coder",
+  "displayName": "Qwen 2.5 Coder (Default)",
+  "engineType": "llama.cpp",
+  "pinned": false,
+  "defaultTtlMs": 900000,
+  "role": "chat",
+  "parameterOverrides": {
+    "temperature": 0.2
+  },
+  "createdAt": "2026-03-31T12:00:00.000Z",
+  "updatedAt": "2026-03-31T12:00:00.000Z"
+}

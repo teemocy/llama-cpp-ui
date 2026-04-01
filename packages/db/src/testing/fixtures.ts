@@ -145,3 +145,33 @@ export const fixtureApiLog: ApiLogRecord = {
   statusCode: 200,
   createdAt: FIXTURE_TIMESTAMP,
 };
+
+export interface RepositoryFixtureSet {
+  modelArtifact: ModelArtifact;
+  modelProfile: ModelProfile;
+  engineVersion: EngineVersionRecord;
+  downloadTask: DownloadTask;
+  promptCacheRecord: PromptCacheRecord;
+  apiTokenRecord: ApiTokenRecord;
+  chatSession: ChatSession;
+  chatMessage: ChatMessage;
+  apiLog: ApiLogRecord;
+}
+
+function cloneFixture<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+export function createRepositoryFixtureSet(): RepositoryFixtureSet {
+  return {
+    modelArtifact: cloneFixture(fixtureModelArtifact),
+    modelProfile: cloneFixture(fixtureModelProfile),
+    engineVersion: cloneFixture(fixtureEngineVersion),
+    downloadTask: cloneFixture(fixtureDownloadTask),
+    promptCacheRecord: cloneFixture(fixturePromptCacheRecord),
+    apiTokenRecord: cloneFixture(fixtureApiTokenRecord),
+    chatSession: cloneFixture(fixtureChatSession),
+    chatMessage: cloneFixture(fixtureChatMessage),
+    apiLog: cloneFixture(fixtureApiLog),
+  };
+}

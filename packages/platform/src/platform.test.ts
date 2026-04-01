@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { LOCAL_ARTIFACT_LAYOUT_SPEC } from "@localhub/shared-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { resolveAppPaths } from "./app-paths.js";
+import { ensureAppPaths, resolveAppPaths } from "./app-paths.js";
 import { loadGatewayConfig } from "./config.js";
 import { readGatewayDiscoveryFile, writeGatewayDiscoveryFile } from "./discovery.js";
 import { createLogger } from "./logger.js";
@@ -25,6 +26,30 @@ describe("platform helpers", () => {
     const paths = resolveAppPaths({ cwd: root, environment: "development" });
     expect(paths.supportRoot).toContain(path.join(".local", "local-llm-hub", "dev"));
     expect(paths.databaseFile.endsWith("gateway.sqlite")).toBe(true);
+    expect(paths.promptCachesDir).toContain(
+      LOCAL_ARTIFACT_LAYOUT_SPEC.directories.promptCaches.relativePath,
+    );
+    expect(paths.checksumsDir).toContain(
+      LOCAL_ARTIFACT_LAYOUT_SPEC.directories.checksums.relativePath,
+    );
+    expect(paths.tempDir).toContain(LOCAL_ARTIFACT_LAYOUT_SPEC.directories.temp.relativePath);
+    expect(paths.promptCacheDir).toBe(paths.promptCachesDir);
+  });
+
+  it("provisions the shared artifact layout directories", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "local-llm-hub-layout-"));
+    tempDirectories.push(root);
+
+    const paths = ensureAppPaths(
+      resolveAppPaths({ supportRoot: root, environment: "development" }),
+    );
+
+    expect(existsSync(paths.enginesDir)).toBe(true);
+    expect(existsSync(paths.modelsDir)).toBe(true);
+    expect(existsSync(paths.downloadsDir)).toBe(true);
+    expect(existsSync(paths.checksumsDir)).toBe(true);
+    expect(existsSync(paths.promptCachesDir)).toBe(true);
+    expect(existsSync(paths.tempDir)).toBe(true);
   });
 
   it("loads gateway config with environment overrides", () => {

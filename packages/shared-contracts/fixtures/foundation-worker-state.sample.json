@@ -1,0 +1,14 @@
+{
+  "runtimeKey": {
+    "modelId": "model_qwen25_coder",
+    "engineType": "llama.cpp",
+    "role": "chat",
+    "configHash": "cfg_qwen25_coder_default"
+  },
+  "runtimeKeyString": "model_qwen25_coder__llama.cpp__chat__cfg_qwen25_coder_default",
+  "state": "Ready",
+  "modelId": "model_qwen25_coder",
+  "pid": 4242,
+  "startedAt": "2026-03-31T12:05:00.000Z",
+  "updatedAt": "2026-03-31T12:06:00.000Z"
+}

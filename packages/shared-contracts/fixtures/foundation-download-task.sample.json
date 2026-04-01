@@ -1,0 +1,14 @@
+{
+  "id": "download_qwen25",
+  "modelId": "model_qwen25_coder",
+  "provider": "huggingface",
+  "url": "https://huggingface.co/example/model.gguf",
+  "totalBytes": 1000,
+  "downloadedBytes": 250,
+  "status": "downloading",
+  "createdAt": "2026-03-31T12:00:00.000Z",
+  "updatedAt": "2026-03-31T12:00:00.000Z",
+  "metadata": {
+    "fileName": "model.gguf"
+  }
+}

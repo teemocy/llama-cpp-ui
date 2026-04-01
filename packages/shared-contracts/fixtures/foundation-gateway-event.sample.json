@@ -1,0 +1,17 @@
+{
+  "type": "MODEL_STATE_CHANGED",
+  "ts": "2026-03-31T12:06:00.000Z",
+  "traceId": "trace_12345678",
+  "payload": {
+    "modelId": "model_qwen25_coder",
+    "runtimeKey": {
+      "modelId": "model_qwen25_coder",
+      "engineType": "llama.cpp",
+      "role": "chat",
+      "configHash": "cfg_qwen25_coder_default"
+    },
+    "previousState": "Loading",
+    "nextState": "Ready",
+    "reason": "health check passed"
+  }
+}

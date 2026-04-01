@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "model_qwen25_coder",
+  "name": "Qwen 2.5 Coder 7B Instruct",
+  "localPath": "/models/qwen2.5-coder.gguf",
+  "format": "gguf",
+  "sizeBytes": 4294967296,
+  "architecture": "qwen2",
+  "quantization": "Q4_K_M",
+  "createdAt": "2026-03-31T12:00:00.000Z",
+  "updatedAt": "2026-03-31T12:00:00.000Z",
+  "source": {
+    "kind": "local"
+  },
+  "metadata": {
+    "schemaVersion": 1,
+    "architecture": "qwen2",
+    "quantization": "Q4_K_M",
+    "contextLength": 32768,
+    "metadata": {}
+  },
+  "capabilities": {
+    "chat": true,
+    "embeddings": false,
+    "tools": true,
+    "streaming": true,
+    "vision": false,
+    "audioTranscription": false,
+    "audioSpeech": false,
+    "rerank": false,
+    "promptCache": true
+  },
+  "tags": ["code", "instruct"]
+}
