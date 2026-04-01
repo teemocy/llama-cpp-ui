@@ -3,14 +3,29 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  chatCompletionsChunkSchema,
   chatCompletionsRequestSchema,
+  chatCompletionsResponseSchema,
+  deserializeGatewayEvent,
+  deserializeRequestTrace,
+  deserializeToolCalls,
+  desktopDownloadCreateRequestSchema,
+  desktopProviderSearchItemSchema,
   downloadTaskSchema,
+  embeddingsRequestSchema,
+  embeddingsResponseSchema,
   gatewayDiscoveryFileSchema,
   gatewayEventSchema,
   gatewayHealthSnapshotSchema,
   modelArtifactSchema,
   modelProfileSchema,
+  openAiModelListSchema,
+  openAiToolCallSchema,
+  requestTraceSchema,
   runtimeKeySchema,
+  serializeGatewayEvent,
+  serializeRequestTrace,
+  serializeToolCalls,
   workerStateSchema,
 } from "./index.js";
 
@@ -57,6 +72,89 @@ describe("shared contracts", () => {
 
     expect(event.type).toBe("MODEL_STATE_CHANGED");
     expect(event.payload.runtimeKey.engineType).toBe("llama.cpp");
+  });
+
+  it("parses the stage 3 chat completions fixtures", () => {
+    const request = chatCompletionsRequestSchema.parse(
+      loadFixture("openai-chat-completions-request.sample.json"),
+    );
+    const response = chatCompletionsResponseSchema.parse(
+      loadFixture("openai-chat-completions-response.sample.json"),
+    );
+    const chunk = chatCompletionsChunkSchema.parse(
+      loadFixture("openai-chat-completion-chunk.sample.json"),
+    );
+
+    expect(request.model).toBe("model_qwen25_coder");
+    expect(response.object).toBe("chat.completion");
+    expect(chunk.object).toBe("chat.completion.chunk");
+  });
+
+  it("parses the stage 3 embeddings fixtures", () => {
+    const request = embeddingsRequestSchema.parse(
+      loadFixture("openai-embeddings-request.sample.json"),
+    );
+    const response = embeddingsResponseSchema.parse(
+      loadFixture("openai-embeddings-response.sample.json"),
+    );
+
+    expect(request.model).toBe("model_bge_small_en");
+    expect(response.data).toHaveLength(1);
+  });
+
+  it("parses the stage 3 request-trace and model-list fixtures", () => {
+    const trace = requestTraceSchema.parse(loadFixture("foundation-request-trace.sample.json"));
+    const modelList = openAiModelListSchema.parse(loadFixture("openai-model-list.sample.json"));
+
+    expect(trace.route).toBe("POST /v1/chat/completions");
+    expect(modelList.data[0]?.object).toBe("model");
+  });
+
+  it("round-trips tool calls, gateway events, and request traces", () => {
+    const toolCalls = openAiToolCallSchema.array().parse([
+      {
+        id: "call_weather",
+        type: "function",
+        function: {
+          name: "lookup_weather",
+          arguments: '{"location":"Shanghai"}',
+        },
+      },
+    ]);
+    const event = gatewayEventSchema.parse(loadFixture("foundation-gateway-event.sample.json"));
+    const trace = requestTraceSchema.parse(loadFixture("foundation-request-trace.sample.json"));
+
+    expect(deserializeToolCalls(serializeToolCalls(toolCalls))).toEqual(toolCalls);
+    expect(deserializeGatewayEvent(serializeGatewayEvent(event))).toEqual(event);
+    expect(deserializeRequestTrace(serializeRequestTrace(trace))).toEqual(trace);
+  });
+
+  it("keeps provider search items round-trippable into create-download requests", () => {
+    const item = desktopProviderSearchItemSchema.parse({
+      id: "https://example.invalid/search/result/gateway-stage3-chat-q4.gguf",
+      provider: "huggingface",
+      providerModelId: "acme/stage3-gateway-chat",
+      artifactId: "gateway-stage3-chat-q4",
+      title: "Gateway Stage3 Chat",
+      artifactName: "gateway-stage3-chat-q4.gguf",
+      downloadUrl:
+        "https://example.invalid/acme/stage3-gateway-chat/resolve/main/gateway-stage3-chat-q4.gguf",
+      metadata: {},
+    });
+
+    const createRequest = desktopDownloadCreateRequestSchema.parse({
+      provider: item.provider,
+      providerModelId: item.providerModelId,
+      artifactId: item.artifactId,
+      title: item.title,
+      artifactName: item.artifactName,
+      downloadUrl: item.downloadUrl,
+      metadata: item.metadata,
+    });
+
+    expect(createRequest.providerModelId).toBe("acme/stage3-gateway-chat");
+    expect(createRequest.artifactId).toBe("gateway-stage3-chat-q4");
+    expect(item.id).not.toBe(item.providerModelId);
   });
 
   it("parses a gateway event envelope", () => {

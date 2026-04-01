@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   fileSystemPathSchema,
   isoDatetimeSchema,
+  jsonRecordSchema,
   nonEmptyStringSchema,
   positiveIntegerSchema,
 } from "./common.js";
@@ -13,6 +14,8 @@ import {
   modelSourceKindSchema,
   runtimeRoleSchema,
 } from "./models.js";
+import { openAiMessageSchema } from "./openai.js";
+import { apiLogRecordSchema, chatMessageSchema, chatSessionSchema } from "./persistence.js";
 
 export const desktopModelRuntimeStateSchema = z.enum([
   "idle",
@@ -107,6 +110,129 @@ export const desktopLocalModelImportResponseSchema = z.object({
   model: desktopModelRecordSchema,
 });
 
+export const desktopChatSessionListSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(chatSessionSchema),
+});
+
+export const desktopChatMessageListSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(chatMessageSchema),
+});
+
+export const desktopChatSessionUpsertRequestSchema = z.object({
+  id: nonEmptyStringSchema.optional(),
+  modelId: nonEmptyStringSchema.optional(),
+  title: z.string().optional(),
+  systemPrompt: z.string().optional(),
+});
+
+export const desktopChatRunRequestSchema = z.object({
+  sessionId: nonEmptyStringSchema.optional(),
+  model: nonEmptyStringSchema,
+  systemPrompt: z.string().optional(),
+  message: z.string().min(1),
+});
+
+export const desktopChatRunResponseSchema = z.object({
+  session: chatSessionSchema,
+  userMessage: chatMessageSchema,
+  assistantMessage: chatMessageSchema,
+  response: z.object({
+    id: nonEmptyStringSchema,
+    object: z.literal("chat.completion"),
+    created: z.number().int().nonnegative(),
+    model: nonEmptyStringSchema,
+    choices: z.array(
+      z.object({
+        index: z.number().int().nonnegative(),
+        finish_reason: z.string().nullable(),
+        message: openAiMessageSchema,
+      }),
+    ),
+    usage: z
+      .object({
+        prompt_tokens: positiveIntegerSchema,
+        completion_tokens: positiveIntegerSchema,
+        total_tokens: positiveIntegerSchema,
+      })
+      .optional(),
+  }),
+});
+
+export const desktopApiLogListSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(apiLogRecordSchema),
+});
+
+export const desktopProviderSearchItemSchema = z.object({
+  id: nonEmptyStringSchema,
+  provider: z.enum(["huggingface", "modelscope"]),
+  providerModelId: nonEmptyStringSchema,
+  artifactId: nonEmptyStringSchema,
+  title: nonEmptyStringSchema,
+  author: nonEmptyStringSchema.optional(),
+  summary: z.string().optional(),
+  description: z.string().optional(),
+  tags: z.array(nonEmptyStringSchema).default([]),
+  formats: z.array(nonEmptyStringSchema).default([]),
+  downloads: z.number().int().nonnegative().optional(),
+  likes: z.number().int().nonnegative().optional(),
+  updatedAt: isoDatetimeSchema.optional(),
+  artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  quantization: nonEmptyStringSchema.optional(),
+  architecture: nonEmptyStringSchema.optional(),
+  checksumSha256: nonEmptyStringSchema.optional(),
+  metadata: jsonRecordSchema.default({}),
+});
+
+export const desktopProviderSearchResultSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(desktopProviderSearchItemSchema),
+  warnings: z.array(z.string()).default([]),
+});
+
+export const desktopDownloadTaskSchema = z.object({
+  id: nonEmptyStringSchema,
+  modelId: nonEmptyStringSchema.optional(),
+  provider: z.enum(["huggingface", "modelscope"]),
+  title: nonEmptyStringSchema,
+  artifactName: nonEmptyStringSchema,
+  status: z.enum(["pending", "downloading", "paused", "completed", "error"]),
+  progress: z.number().int().min(0).max(100),
+  downloadedBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative().optional(),
+  rateBytesPerSecond: z.number().nonnegative().optional(),
+  destinationPath: fileSystemPathSchema.optional(),
+  updatedAt: isoDatetimeSchema,
+  errorMessage: z.string().optional(),
+});
+
+export const desktopDownloadListSchema = z.object({
+  object: z.literal("list"),
+  data: z.array(desktopDownloadTaskSchema),
+});
+
+export const desktopDownloadCreateRequestSchema = z.object({
+  provider: z.enum(["huggingface", "modelscope"]),
+  providerModelId: nonEmptyStringSchema,
+  artifactId: nonEmptyStringSchema,
+  title: nonEmptyStringSchema,
+  artifactName: nonEmptyStringSchema,
+  downloadUrl: z.string().url(),
+  destinationPath: fileSystemPathSchema.optional(),
+  checksumSha256: nonEmptyStringSchema.optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+  metadata: jsonRecordSchema.default({}),
+});
+
+export const desktopDownloadActionResponseSchema = z.object({
+  accepted: z.boolean(),
+  task: desktopDownloadTaskSchema,
+});
+
 export const gatewayDiscoverySchema = gatewayDiscoveryFileSchema;
 export const rendererDiscoverySchema = gatewayDiscoveryFileSchema;
 
@@ -143,5 +269,17 @@ export type DesktopModelRecord = z.infer<typeof desktopModelRecordSchema>;
 export type DesktopModelLibrary = z.infer<typeof desktopModelLibrarySchema>;
 export type DesktopLocalModelImportRequest = z.infer<typeof desktopLocalModelImportRequestSchema>;
 export type DesktopLocalModelImportResponse = z.infer<typeof desktopLocalModelImportResponseSchema>;
+export type DesktopChatSessionList = z.infer<typeof desktopChatSessionListSchema>;
+export type DesktopChatMessageList = z.infer<typeof desktopChatMessageListSchema>;
+export type DesktopChatSessionUpsertRequest = z.infer<typeof desktopChatSessionUpsertRequestSchema>;
+export type DesktopChatRunRequest = z.infer<typeof desktopChatRunRequestSchema>;
+export type DesktopChatRunResponse = z.infer<typeof desktopChatRunResponseSchema>;
+export type DesktopApiLogList = z.infer<typeof desktopApiLogListSchema>;
+export type DesktopProviderSearchItem = z.infer<typeof desktopProviderSearchItemSchema>;
+export type DesktopProviderSearchResult = z.infer<typeof desktopProviderSearchResultSchema>;
+export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
+export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
+export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;
+export type DesktopDownloadActionResponse = z.infer<typeof desktopDownloadActionResponseSchema>;
 export type DesktopShellPhase = z.infer<typeof desktopShellPhaseSchema>;
 export type DesktopShellState = z.infer<typeof desktopShellStateSchema>;

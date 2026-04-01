@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import type { DatabaseSync } from "node:sqlite";
 
 import {
+  ChatRepository,
   DownloadTasksRepository,
   EngineVersionsRepository,
   ModelsRepository,
@@ -13,17 +14,42 @@ import {
 } from "@localhub/db";
 import { runtimeKeyToString } from "@localhub/engine-core";
 import {
+  LlamaCppDownloadManager,
   LlamaCppModelManager,
+  type ProviderSearchService,
+  createDefaultProviderSearchService,
   createLlamaCppAdapter,
   createLlamaCppHarness,
 } from "@localhub/engine-llama";
 import { resolveAppPaths } from "@localhub/platform";
 import {
+  type ChatCompletionsRequest,
+  type ChatCompletionsResponse,
+  type DesktopApiLogList,
+  type DesktopChatMessageList,
+  type DesktopChatRunRequest,
+  type DesktopChatRunResponse,
+  type DesktopChatSessionList,
+  type DesktopChatSessionUpsertRequest,
+  type DesktopDownloadActionResponse,
+  type DesktopDownloadCreateRequest,
+  type DesktopDownloadList,
   type DesktopLocalModelImportResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
+  type DesktopProviderSearchResult,
+  type EmbeddingsRequest,
+  type EmbeddingsResponse,
   type GatewayEvent,
+  chatCompletionsResponseSchema,
+  desktopApiLogListSchema,
+  desktopChatMessageListSchema,
+  desktopChatRunResponseSchema,
+  desktopChatSessionListSchema,
+  desktopDownloadActionResponseSchema,
+  desktopDownloadListSchema,
   desktopLocalModelImportRequestSchema,
+  embeddingsResponseSchema,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
 import type {
@@ -31,30 +57,38 @@ import type {
   ModelArtifact,
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
-import type { EngineVersionRecord } from "@localhub/shared-contracts/foundation-persistence";
-
 import type {
-  ControlHealthSnapshot,
-  DownloadTaskRecord,
-  EngineRecord,
-  EvictModelResult,
-  GatewayPlane,
-  GatewayRuntime,
-  PreloadModelResult,
-  RequestTraceRecord,
-  RuntimeEventKey,
-  RuntimeEventRole,
-  RuntimeEventRoute,
-  RuntimeEventTrace,
-  RuntimeLifecycleState,
-  RuntimeModelRecord,
-  WorkerState,
+  ChatMessage,
+  ChatSession,
+  EngineVersionRecord,
+} from "@localhub/shared-contracts/foundation-persistence";
+
+import {
+  type ChatCompletionsStreamResult,
+  type ControlHealthSnapshot,
+  type DownloadTaskRecord,
+  type EngineRecord,
+  type EvictModelResult,
+  type GatewayExecutionContext,
+  type GatewayPlane,
+  GatewayRequestError,
+  type GatewayRuntime,
+  type PreloadModelResult,
+  type RequestTraceRecord,
+  type RuntimeEventKey,
+  type RuntimeEventRole,
+  type RuntimeEventRoute,
+  type RuntimeEventTrace,
+  type RuntimeLifecycleState,
+  type RuntimeModelRecord,
+  type WorkerState,
 } from "../types.js";
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
 const DEFAULT_LOAD_TIMEOUT_MS = 5_000;
+const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
 const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   chat: true,
   embeddings: true,
@@ -69,6 +103,8 @@ interface RepositoryGatewayRuntimeOptions {
   defaultModelTtlMs: number;
   preferFakeWorker?: boolean;
   fakeWorkerStartupDelayMs?: number;
+  providerSearch?: ProviderSearchService;
+  downloadFetch?: typeof fetch;
 }
 
 interface ResolvedModelRecord {
@@ -91,6 +127,7 @@ interface ManagedWorker {
   artifact: ModelArtifact;
   evictionTimer: NodeJS.Timeout | undefined;
   harness: Awaited<ReturnType<typeof createLlamaCppHarness>>;
+  inflightRequests: number;
   intentionalStop: boolean;
   loadedAt: string;
   profile: ModelProfile;
@@ -263,6 +300,196 @@ function getMissingArtifactMessage(artifact: ModelArtifact): string {
   return `Local artifact is missing from ${artifact.localPath}.`;
 }
 
+function normalizeBaseUrl(healthUrl: string): string {
+  return healthUrl.replace(/\/(?:healthz?|)+$/, "").replace(/\/+$/, "");
+}
+
+function countTextTokens(value: string): number {
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
+}
+
+function createSessionTitle(message: string): string {
+  const trimmed = message.replace(/\s+/g, " ").trim();
+  return trimmed.length <= 56 ? trimmed : `${trimmed.slice(0, 53).trimEnd()}...`;
+}
+
+function getChatUsage(response: ChatCompletionsResponse): {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+} {
+  return {
+    ...(response.usage?.prompt_tokens !== undefined
+      ? { promptTokens: response.usage.prompt_tokens }
+      : {}),
+    ...(response.usage?.completion_tokens !== undefined
+      ? { completionTokens: response.usage.completion_tokens }
+      : {}),
+    ...(response.usage?.total_tokens !== undefined
+      ? { totalTokens: response.usage.total_tokens }
+      : {}),
+  };
+}
+
+function createFakeCompletionId(prefix: string, traceId: string): string {
+  return `${prefix}-${traceId.replace(/[^A-Za-z0-9]+/g, "").slice(0, 12) || randomUUID().slice(0, 12)}`;
+}
+
+function createFakeChatCompletionResponse(
+  input: ChatCompletionsRequest,
+  traceId: string,
+): ChatCompletionsResponse {
+  const created = Math.floor(Date.now() / 1000);
+  const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
+  const userContent =
+    typeof lastUserMessage?.content === "string"
+      ? lastUserMessage.content
+      : JSON.stringify(lastUserMessage?.content ?? "");
+  const promptTokens = countTextTokens(userContent);
+
+  if (input.tools?.length) {
+    return {
+      id: createFakeCompletionId("chatcmpl", traceId),
+      object: "chat.completion",
+      created,
+      model: input.model,
+      choices: [
+        {
+          index: 0,
+          finish_reason: "tool_calls",
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: createFakeCompletionId("call", traceId),
+                type: "function",
+                function: {
+                  name: input.tools[0]?.function.name ?? "tool",
+                  arguments: JSON.stringify({ input: userContent }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: 1,
+        total_tokens: promptTokens + 1,
+      },
+    };
+  }
+
+  const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake llama.cpp"}`;
+  const completionTokens = countTextTokens(answer);
+
+  return {
+    id: createFakeCompletionId("chatcmpl", traceId),
+    object: "chat.completion",
+    created,
+    model: input.model,
+    choices: [
+      {
+        index: 0,
+        finish_reason: "stop",
+        message: {
+          role: "assistant",
+          content: answer,
+        },
+      },
+    ],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    },
+  };
+}
+
+function createFakeChatStreamResponse(input: ChatCompletionsRequest, traceId: string): Response {
+  const completion = createFakeChatCompletionResponse(input, traceId);
+  const encoder = new TextEncoder();
+  const chunks = [
+    {
+      id: completion.id,
+      object: "chat.completion.chunk",
+      created: completion.created,
+      model: completion.model,
+      choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    },
+    {
+      id: completion.id,
+      object: "chat.completion.chunk",
+      created: completion.created,
+      model: completion.model,
+      choices: completion.choices[0]?.message.tool_calls
+        ? [
+            {
+              index: 0,
+              delta: { tool_calls: completion.choices[0].message.tool_calls },
+              finish_reason: null,
+            },
+          ]
+        : [
+            {
+              index: 0,
+              delta: { content: completion.choices[0]?.message.content ?? "" },
+              finish_reason: null,
+            },
+          ],
+    },
+    {
+      id: completion.id,
+      object: "chat.completion.chunk",
+      created: completion.created,
+      model: completion.model,
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: completion.choices[0]?.finish_reason ?? "stop",
+        },
+      ],
+    },
+  ];
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+      },
+    },
+  );
+}
+
+function createFakeEmbeddingsResponse(input: EmbeddingsRequest): EmbeddingsResponse {
+  const values = Array.isArray(input.input) ? input.input : [input.input];
+
+  return {
+    object: "list",
+    model: input.model,
+    data: values.map((value, index) => ({
+      object: "embedding",
+      index,
+      embedding: Array.from({ length: 8 }, (_, position) =>
+        Number((((String(value).length + 1) * (position + 3)) / 100).toFixed(6)),
+      ),
+    })),
+  };
+}
+
 function toRuntimeModelRecord(
   stored: StoredModelRecord,
   snapshot?: RuntimeSnapshot,
@@ -348,33 +575,20 @@ function toDesktopModelRecord(
   };
 }
 
-function toDownloadRecord(task: {
-  id: string;
-  provider: "huggingface" | "modelscope" | "manual" | "local" | "unknown";
-  modelId?: string | undefined;
-  status: "pending" | "downloading" | "paused" | "completed" | "error";
-  downloadedBytes: number;
-  totalBytes?: number | undefined;
-}): DownloadTaskRecord {
-  const progress =
-    typeof task.totalBytes === "number" && task.totalBytes > 0
-      ? Math.min(100, Math.round((task.downloadedBytes / task.totalBytes) * 100))
-      : 0;
-
+function toDownloadRecord(task: ReturnType<LlamaCppDownloadManager["listDownloads"]>[number]) {
   return {
     id: task.id,
-    provider:
-      task.provider === "huggingface" || task.provider === "modelscope"
-        ? task.provider
-        : "huggingface",
-    modelId: task.modelId ?? "unknown",
-    status:
-      task.status === "downloading"
-        ? "running"
-        : task.status === "completed"
-          ? "completed"
-          : "queued",
-    progress,
+    ...(task.modelId ? { modelId: task.modelId } : {}),
+    provider: task.provider,
+    title: task.providerModelId.split("/").at(-1) ?? task.providerModelId,
+    artifactName: task.fileName,
+    status: task.status,
+    progress: task.progress,
+    downloadedBytes: task.downloadedBytes,
+    ...(task.totalBytes !== undefined ? { totalBytes: task.totalBytes } : {}),
+    destinationPath: task.destinationPath,
+    updatedAt: task.updatedAt,
+    ...(task.errorMessage ? { errorMessage: task.errorMessage } : {}),
   };
 }
 
@@ -407,6 +621,11 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
+    case "GET /control/chat/sessions":
+    case "GET /control/chat/messages":
+    case "POST /control/chat/sessions":
+    case "POST /control/chat/run":
+    case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
     case "POST /control/downloads":
@@ -425,9 +644,11 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
 
 export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #adapter;
+  readonly #chatRepository: ChatRepository;
   readonly #database: DatabaseSync;
   readonly #defaultModelTtlMs: number;
   readonly #downloadsRepository: DownloadTasksRepository;
+  readonly #downloadManager: LlamaCppDownloadManager;
   readonly #enginesRepository: EngineVersionsRepository;
   readonly #modelManager: LlamaCppModelManager;
   readonly #modelsRepository: ModelsRepository;
@@ -465,6 +686,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#modelsRepository = new ModelsRepository(database);
     this.#enginesRepository = new EngineVersionsRepository(database);
     this.#downloadsRepository = new DownloadTasksRepository(database);
+    this.#chatRepository = new ChatRepository(database);
     this.#adapter = createLlamaCppAdapter({
       supportRoot: this.#supportRoot,
       ...(options.env ? { env: options.env } : {}),
@@ -480,6 +702,16 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       adapter: this.#adapter,
       modelsRepository: this.#modelsRepository,
       engineVersionsRepository: this.#enginesRepository,
+    });
+    this.#downloadManager = new LlamaCppDownloadManager({
+      supportRoot: this.#supportRoot,
+      downloadsRepository: this.#downloadsRepository,
+      modelManager: this.#modelManager,
+      providerSearch: options.providerSearch ?? createDefaultProviderSearchService(),
+      ...(options.downloadFetch ? { fetch: options.downloadFetch } : {}),
+      emitEvent: (event: GatewayEvent) => {
+        this.publish(event);
+      },
     });
   }
 
@@ -593,8 +825,213 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
-  listDownloads(): DownloadTaskRecord[] {
-    return this.#downloadsRepository.listActive().map((task) => toDownloadRecord(task));
+  listDownloads(): DesktopDownloadList {
+    return desktopDownloadListSchema.parse({
+      object: "list",
+      data: this.#downloadManager
+        .listDownloads()
+        .map((task: Parameters<typeof toDownloadRecord>[0]) => toDownloadRecord(task)),
+    });
+  }
+
+  listChatSessions(): DesktopChatSessionList {
+    return desktopChatSessionListSchema.parse({
+      object: "list",
+      data: this.#chatRepository.listSessions(),
+    });
+  }
+
+  listChatMessages(sessionId: string): DesktopChatMessageList {
+    return desktopChatMessageListSchema.parse({
+      object: "list",
+      data: this.#chatRepository.listMessages(sessionId),
+    });
+  }
+
+  upsertChatSession(input: DesktopChatSessionUpsertRequest): ChatSession {
+    const now = nowIso();
+    const existing = input.id
+      ? this.#chatRepository.listSessions().find((session) => session.id === input.id)
+      : undefined;
+    const session: ChatSession = {
+      id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
+      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...((input.modelId ?? existing?.modelId)
+        ? { modelId: input.modelId ?? existing?.modelId }
+        : {}),
+      ...((input.systemPrompt ?? existing?.systemPrompt)
+        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
+        : {}),
+      metadata: existing?.metadata ?? {},
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+
+    this.#chatRepository.upsertSession(session);
+    return session;
+  }
+
+  async runChat(input: DesktopChatRunRequest, traceId?: string): Promise<DesktopChatRunResponse> {
+    const now = nowIso();
+    const session = this.upsertChatSession({
+      ...(input.sessionId ? { id: input.sessionId } : {}),
+      modelId: input.model,
+      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+    });
+    const userMessage: ChatMessage = {
+      id: `message_${randomUUID().slice(0, 12)}`,
+      sessionId: session.id,
+      role: "user",
+      content: input.message,
+      toolCalls: [],
+      tokensCount: countTextTokens(input.message),
+      metadata: {},
+      createdAt: now,
+    };
+    this.#chatRepository.appendMessage(userMessage);
+
+    const completion = await this.createChatCompletion(
+      {
+        model: input.model,
+        stream: false,
+        messages: [
+          ...(session.systemPrompt
+            ? [{ role: "system" as const, content: session.systemPrompt }]
+            : []),
+          ...this.#chatRepository.listMessages(session.id).map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        ],
+      },
+      {
+        traceId: normalizeTraceId(traceId),
+      },
+    );
+
+    const assistantContent = completion.choices[0]?.message.content;
+    const assistantMessage: ChatMessage = {
+      id: `message_${randomUUID().slice(0, 12)}`,
+      sessionId: session.id,
+      role: "assistant",
+      content:
+        typeof assistantContent === "string"
+          ? assistantContent
+          : JSON.stringify(assistantContent ?? ""),
+      toolCalls: completion.choices[0]?.message.tool_calls ?? [],
+      tokensCount: completion.usage?.completion_tokens,
+      metadata: {},
+      createdAt: nowIso(),
+    };
+    this.#chatRepository.appendMessage(assistantMessage);
+
+    const updatedSession = this.upsertChatSession({
+      id: session.id,
+      modelId: input.model,
+      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.title ? { title: session.title } : { title: createSessionTitle(input.message) }),
+    });
+
+    return desktopChatRunResponseSchema.parse({
+      session: updatedSession,
+      userMessage,
+      assistantMessage,
+      response: completion,
+    });
+  }
+
+  listRecentApiLogs(limit = 30): DesktopApiLogList {
+    return desktopApiLogListSchema.parse({
+      object: "list",
+      data: this.#chatRepository.listRecentApiLogs(limit),
+    });
+  }
+
+  async searchCatalog(query: string): Promise<DesktopProviderSearchResult> {
+    const result = await this.#downloadManager.search({
+      text: query,
+      formats: ["gguf"],
+      limit: 20,
+    });
+
+    return {
+      object: "list",
+      data: result.items.flatMap(
+        (item: Awaited<ReturnType<LlamaCppDownloadManager["search"]>>["items"][number]) =>
+          item.artifacts.flatMap(
+            (
+              artifact: Awaited<
+                ReturnType<LlamaCppDownloadManager["search"]>
+              >["items"][number]["artifacts"][number],
+            ) => {
+              if (!artifact.downloadUrl) {
+                return [];
+              }
+
+              return [
+                {
+                  id: artifact.downloadUrl,
+                  provider: item.provider,
+                  providerModelId: item.providerModelId,
+                  artifactId: artifact.artifactId,
+                  title: item.title,
+                  ...(item.author ? { author: item.author } : {}),
+                  ...(item.description ? { summary: item.description } : {}),
+                  ...(item.description ? { description: item.description } : {}),
+                  tags: item.tags,
+                  formats: item.formats,
+                  ...(item.downloads !== undefined ? { downloads: item.downloads } : {}),
+                  ...(item.likes !== undefined ? { likes: item.likes } : {}),
+                  ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+                  artifactName: artifact.fileName,
+                  downloadUrl: artifact.downloadUrl,
+                  ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
+                  ...(artifact.quantization ? { quantization: artifact.quantization } : {}),
+                  ...(artifact.architecture ? { architecture: artifact.architecture } : {}),
+                  ...(artifact.checksum?.algorithm === "sha256"
+                    ? { checksumSha256: artifact.checksum.value }
+                    : {}),
+                  metadata: artifact.metadata ?? {},
+                },
+              ];
+            },
+          ),
+      ),
+      warnings: result.warnings,
+    };
+  }
+
+  async createDownload(
+    input: DesktopDownloadCreateRequest,
+    _traceId?: string,
+  ): Promise<DesktopDownloadActionResponse> {
+    const task = await this.#downloadManager.startDownload({
+      provider: input.provider,
+      providerModelId: input.providerModelId,
+      artifactId: input.artifactId,
+      displayName: input.title,
+    });
+
+    return desktopDownloadActionResponseSchema.parse({
+      accepted: true,
+      task: toDownloadRecord(task),
+    });
+  }
+
+  async pauseDownload(id: string, _traceId?: string): Promise<DesktopDownloadActionResponse> {
+    const task = await this.#downloadManager.pauseDownload(id);
+    return desktopDownloadActionResponseSchema.parse({
+      accepted: true,
+      task: toDownloadRecord(task),
+    });
+  }
+
+  async resumeDownload(id: string, _traceId?: string): Promise<DesktopDownloadActionResponse> {
+    const task = await this.#downloadManager.resumeDownload(id);
+    return desktopDownloadActionResponseSchema.parse({
+      accepted: true,
+      task: toDownloadRecord(task),
+    });
   }
 
   listEngines(): EngineRecord[] {
@@ -730,6 +1167,223 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     };
   }
 
+  async createChatCompletion(
+    input: ChatCompletionsRequest,
+    context: GatewayExecutionContext,
+  ): Promise<ChatCompletionsResponse> {
+    const worker = await this.acquireWorkerForRequest(input.model, "chat", context.traceId);
+    const startedAt = Date.now();
+
+    try {
+      const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", input);
+      const payload = chatCompletionsResponseSchema.parse(
+        this.#adapter.normalizeResponse(await response.json()),
+      );
+      const usage = getChatUsage(payload);
+
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: input.model,
+        endpoint: "/v1/chat/completions",
+        requestIp: context.remoteAddress,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalDurationMs: Date.now() - startedAt,
+        tokensPerSecond:
+          usage.completionTokens && Date.now() > startedAt
+            ? Number((usage.completionTokens / ((Date.now() - startedAt) / 1000)).toFixed(2))
+            : undefined,
+        statusCode: response.status,
+        createdAt: nowIso(),
+      });
+
+      return payload;
+    } catch (error) {
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: input.model,
+        endpoint: "/v1/chat/completions",
+        requestIp: context.remoteAddress,
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+        errorMessage: error instanceof Error ? error.message : "Chat completion failed.",
+        createdAt: nowIso(),
+      });
+      throw error;
+    } finally {
+      this.releaseWorkerAfterRequest(worker, context.traceId, "Chat completion finished.");
+    }
+  }
+
+  async createChatCompletionStream(
+    input: ChatCompletionsRequest,
+    context: GatewayExecutionContext,
+  ): Promise<ChatCompletionsStreamResult> {
+    const worker = await this.acquireWorkerForRequest(input.model, "chat", context.traceId);
+    const startedAt = Date.now();
+    let firstChunkAt: number | undefined;
+    let settled = false;
+
+    try {
+      const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", {
+        ...input,
+        stream: true,
+      });
+
+      if (!response.body) {
+        throw new GatewayRequestError(
+          "stream_unavailable",
+          "The model worker did not provide a streaming response body.",
+          502,
+        );
+      }
+
+      const reader = response.body.getReader();
+      const encoder = new TextEncoder();
+      const finalize = (reason: string) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        this.releaseWorkerAfterRequest(worker, context.traceId, reason);
+      };
+      const stream = new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          const heartbeat = setInterval(() => {
+            controller.enqueue(encoder.encode(": keep-alive\n\n"));
+          }, DEFAULT_STREAM_HEARTBEAT_MS);
+          heartbeat.unref?.();
+
+          void (async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  break;
+                }
+
+                if (firstChunkAt === undefined) {
+                  firstChunkAt = Date.now();
+                }
+
+                controller.enqueue(value);
+              }
+
+              controller.close();
+              this.insertApiLog({
+                traceId: context.traceId,
+                modelId: input.model,
+                endpoint: "/v1/chat/completions",
+                requestIp: context.remoteAddress,
+                ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
+                totalDurationMs: Date.now() - startedAt,
+                statusCode: response.status,
+                createdAt: nowIso(),
+              });
+            } catch (error) {
+              controller.error(error);
+              this.insertApiLog({
+                traceId: context.traceId,
+                modelId: input.model,
+                endpoint: "/v1/chat/completions",
+                requestIp: context.remoteAddress,
+                ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
+                totalDurationMs: Date.now() - startedAt,
+                statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+                errorMessage: error instanceof Error ? error.message : "Streaming chat failed.",
+                createdAt: nowIso(),
+              });
+            } finally {
+              clearInterval(heartbeat);
+              reader.releaseLock();
+              finalize("Streaming chat finished.");
+            }
+          })();
+        },
+        cancel: async () => {
+          await reader.cancel().catch(() => undefined);
+          this.insertApiLog({
+            traceId: context.traceId,
+            modelId: input.model,
+            endpoint: "/v1/chat/completions",
+            requestIp: context.remoteAddress,
+            ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
+            totalDurationMs: Date.now() - startedAt,
+            statusCode: 499,
+            errorMessage: "Client cancelled the streaming response.",
+            createdAt: nowIso(),
+          });
+          finalize("Streaming chat cancelled.");
+        },
+      });
+
+      return {
+        contentType: response.headers.get("content-type") ?? "text/event-stream; charset=utf-8",
+        stream,
+      };
+    } catch (error) {
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: input.model,
+        endpoint: "/v1/chat/completions",
+        requestIp: context.remoteAddress,
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+        errorMessage: error instanceof Error ? error.message : "Streaming chat failed.",
+        createdAt: nowIso(),
+      });
+      if (!settled) {
+        this.releaseWorkerAfterRequest(worker, context.traceId, "Streaming chat failed.");
+      }
+      throw error;
+    }
+  }
+
+  async createEmbeddings(
+    input: EmbeddingsRequest,
+    context: GatewayExecutionContext,
+  ): Promise<EmbeddingsResponse> {
+    const worker = await this.acquireWorkerForRequest(input.model, "embeddings", context.traceId);
+    const startedAt = Date.now();
+
+    try {
+      const response = await this.fetchWorkerResponse(worker, "/v1/embeddings", input);
+      const payload = embeddingsResponseSchema.parse(
+        this.#adapter.normalizeResponse(await response.json()),
+      );
+
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: input.model,
+        endpoint: "/v1/embeddings",
+        requestIp: context.remoteAddress,
+        promptTokens: countTextTokens(
+          Array.isArray(input.input) ? input.input.join(" ") : input.input,
+        ),
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: response.status,
+        createdAt: nowIso(),
+      });
+
+      return payload;
+    } catch (error) {
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: input.model,
+        endpoint: "/v1/embeddings",
+        requestIp: context.remoteAddress,
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+        errorMessage: error instanceof Error ? error.message : "Embeddings request failed.",
+        createdAt: nowIso(),
+      });
+      throw error;
+    } finally {
+      this.releaseWorkerAfterRequest(worker, context.traceId, "Embeddings request finished.");
+    }
+  }
+
   recordRequestTrace(payload: RequestTraceRecord): void {
     const route = mapRequestRoute(payload.method, payload.path);
     if (!route) {
@@ -807,6 +1461,170 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     };
   }
 
+  private ensureModelCapability(
+    resolved: ResolvedModelRecord,
+    capability: "chat" | "embeddings",
+  ): void {
+    if (!resolved.artifact.capabilities[capability]) {
+      throw new GatewayRequestError(
+        "unsupported_model_capability",
+        `Model ${resolved.artifact.id} does not support ${capability} requests.`,
+        409,
+      );
+    }
+  }
+
+  private async acquireWorkerForRequest(
+    modelId: string,
+    capability: "chat" | "embeddings",
+    traceId: string,
+  ): Promise<ManagedWorker> {
+    const resolved = this.resolveModelRecord(modelId);
+    this.ensureModelCapability(resolved, capability);
+    await this.preloadModel(modelId, traceId);
+
+    const worker = this.#workers.get(resolved.runtimeKeyString);
+    if (!worker) {
+      throw new GatewayRequestError(
+        "worker_unavailable",
+        `Model ${modelId} could not be loaded for request execution.`,
+        503,
+      );
+    }
+
+    if (worker.state === "Busy" || worker.inflightRequests > 0) {
+      throw new GatewayRequestError(
+        "worker_busy",
+        `Model ${modelId} is busy handling another request.`,
+        429,
+      );
+    }
+
+    worker.inflightRequests += 1;
+    worker.state = "Busy";
+    this.publish(
+      this.createModelStateEvent(worker.artifact, "Busy", {
+        previousState: "Ready",
+        reason: "Model is serving a request.",
+        runtimeKey: worker.runtimeKey,
+        traceId,
+      }),
+    );
+
+    return worker;
+  }
+
+  private releaseWorkerAfterRequest(worker: ManagedWorker, traceId: string, reason: string): void {
+    if (!this.#workers.has(worker.runtimeKeyString)) {
+      return;
+    }
+
+    worker.inflightRequests = Math.max(0, worker.inflightRequests - 1);
+    if (worker.inflightRequests > 0 || worker.state === "Unloading") {
+      return;
+    }
+
+    const previousState = worker.state;
+    worker.state = "Ready";
+    this.publish(
+      this.createModelStateEvent(worker.artifact, "Ready", {
+        previousState,
+        reason,
+        runtimeKey: worker.runtimeKey,
+        traceId,
+      }),
+    );
+    this.refreshTtl(worker);
+  }
+
+  private getWorkerBaseUrl(worker: ManagedWorker): string {
+    const healthUrl = worker.harness.command.healthUrl;
+    if (!healthUrl?.startsWith("http")) {
+      throw new GatewayRequestError(
+        "unsupported_worker_transport",
+        `Model ${worker.artifact.id} is not using an HTTP worker transport.`,
+        502,
+      );
+    }
+
+    return normalizeBaseUrl(healthUrl);
+  }
+
+  private async fetchWorkerResponse(
+    worker: ManagedWorker,
+    endpoint: "/v1/chat/completions" | "/v1/embeddings",
+    payload: ChatCompletionsRequest | EmbeddingsRequest,
+  ): Promise<Response> {
+    if (worker.harness.command.transport === "filesystem") {
+      if (endpoint === "/v1/chat/completions") {
+        const chatPayload = payload as ChatCompletionsRequest;
+        return chatPayload.stream
+          ? createFakeChatStreamResponse(chatPayload, randomUUID())
+          : new Response(
+              JSON.stringify(createFakeChatCompletionResponse(chatPayload, randomUUID())),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/json; charset=utf-8",
+                },
+              },
+            );
+      }
+
+      return new Response(
+        JSON.stringify(createFakeEmbeddingsResponse(payload as EmbeddingsRequest)),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+          },
+        },
+      );
+    }
+
+    const response = await fetch(`${this.getWorkerBaseUrl(worker)}${endpoint}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }).catch((error: unknown) => {
+      throw new GatewayRequestError(
+        "worker_request_failed",
+        error instanceof Error ? error.message : "The model worker could not be reached.",
+        502,
+      );
+    });
+
+    if (!response.ok) {
+      const message = await response.text().catch(() => "");
+      throw new GatewayRequestError(
+        "worker_request_failed",
+        message || `The model worker returned HTTP ${response.status}.`,
+        response.status >= 400 && response.status < 500 ? response.status : 502,
+      );
+    }
+
+    return response;
+  }
+
+  private insertApiLog(record: {
+    traceId: string;
+    modelId: string;
+    endpoint: string;
+    requestIp?: string | undefined;
+    promptTokens?: number | undefined;
+    completionTokens?: number | undefined;
+    ttftMs?: number | undefined;
+    totalDurationMs?: number | undefined;
+    tokensPerSecond?: number | undefined;
+    statusCode?: number | undefined;
+    errorMessage?: string | undefined;
+    createdAt: string;
+  }): void {
+    this.#chatRepository.insertApiLog(record);
+  }
+
   private async loadWorker(resolved: ResolvedModelRecord, traceId: string): Promise<ManagedWorker> {
     const previousState = this.#modelSnapshots.get(resolved.artifact.id)?.state ?? "Idle";
     this.publish(
@@ -834,6 +1652,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         artifact: resolved.artifact,
         evictionTimer: undefined,
         harness,
+        inflightRequests: 0,
         intentionalStop: false,
         loadedAt: nowIso(),
         profile: resolved.profile,

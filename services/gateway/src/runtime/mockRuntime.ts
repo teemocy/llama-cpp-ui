@@ -2,28 +2,47 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
+  type ApiLogRecord,
+  type ChatCompletionsRequest,
+  type ChatCompletionsResponse,
+  type ChatMessage,
+  type ChatSession,
+  type DesktopApiLogList,
+  type DesktopChatMessageList,
+  type DesktopChatRunRequest,
+  type DesktopChatRunResponse,
+  type DesktopChatSessionList,
+  type DesktopChatSessionUpsertRequest,
+  type DesktopDownloadActionResponse,
+  type DesktopDownloadCreateRequest,
+  type DesktopDownloadList,
   type DesktopLocalModelImportResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
+  type DesktopProviderSearchResult,
+  type EmbeddingsRequest,
+  type EmbeddingsResponse,
   type GatewayEvent,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
 
-import type {
-  ControlHealthSnapshot,
-  DownloadTaskRecord,
-  EngineRecord,
-  EvictModelResult,
-  GatewayPlane,
-  PreloadModelResult,
-  RequestTraceRecord,
-  RuntimeEventKey,
-  RuntimeEventRole,
-  RuntimeEventRoute,
-  RuntimeEventTrace,
-  RuntimeLifecycleState,
-  RuntimeModelRecord,
-  WorkerState,
+import {
+  type ChatCompletionsStreamResult,
+  type ControlHealthSnapshot,
+  type EngineRecord,
+  type EvictModelResult,
+  type GatewayExecutionContext,
+  type GatewayPlane,
+  GatewayRequestError,
+  type PreloadModelResult,
+  type RequestTraceRecord,
+  type RuntimeEventKey,
+  type RuntimeEventRole,
+  type RuntimeEventRoute,
+  type RuntimeEventTrace,
+  type RuntimeLifecycleState,
+  type RuntimeModelRecord,
+  type WorkerState,
 } from "../types.js";
 
 type GatewaySubscriber = (event: GatewayEvent) => void;
@@ -74,6 +93,11 @@ function createModel(id: string, created: number, capabilities: string[]): Runti
 
 function createTraceId(traceId?: string): string {
   return traceId?.trim() || randomUUID();
+}
+
+function countTokens(value: string): number {
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
 }
 
 function prettifyModelName(modelId: string): string {
@@ -167,6 +191,11 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
+    case "GET /control/chat/sessions":
+    case "GET /control/chat/messages":
+    case "POST /control/chat/sessions":
+    case "POST /control/chat/run":
+    case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
     case "POST /control/downloads":
@@ -189,13 +218,19 @@ const DEFAULT_MODELS: RuntimeModelRecord[] = [
   createModel("localhub/bge-small-en-v1.5", 1_717_459_200, ["embeddings"]),
 ];
 
-const DEFAULT_DOWNLOADS: DownloadTaskRecord[] = [
+const DEFAULT_DOWNLOADS: DesktopDownloadList["data"] = [
   {
     id: "download-demo-1",
     provider: "huggingface",
+    title: "Qwen2.5 7B Instruct GGUF",
+    artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
     modelId: "localhub/qwen2.5-7b-instruct-q4",
-    status: "running",
+    status: "downloading",
     progress: 42,
+    downloadedBytes: 420,
+    totalBytes: 1_000,
+    destinationPath: "/tmp/qwen2.5-7b-instruct-q4_k_m.gguf",
+    updatedAt: new Date().toISOString(),
   },
 ];
 
@@ -214,6 +249,9 @@ const DEFAULT_ENGINES: EngineRecord[] = [
 ];
 
 export class MockGatewayRuntime {
+  readonly #apiLogs: ApiLogRecord[] = [];
+  readonly #chatMessages = new Map<string, ChatMessage[]>();
+  readonly #chatSessions = new Map<string, ChatSession>();
   readonly #modelDetails = new Map<string, DesktopModelRecord>();
   readonly #models = new Map<string, RuntimeModelRecord>();
   readonly #subscribers = new Set<GatewaySubscriber>();
@@ -288,8 +326,172 @@ export class MockGatewayRuntime {
     return Array.from(this.#models.keys(), (modelId) => this.getDesktopModelRecord(modelId));
   }
 
-  listDownloads(): DownloadTaskRecord[] {
-    return structuredClone(this.#downloads);
+  listDownloads(): DesktopDownloadList {
+    return {
+      object: "list",
+      data: structuredClone(this.#downloads),
+    };
+  }
+
+  listChatSessions(): DesktopChatSessionList {
+    return {
+      object: "list",
+      data: [],
+    };
+  }
+
+  listChatMessages(_sessionId: string): DesktopChatMessageList {
+    return {
+      object: "list",
+      data: [],
+    };
+  }
+
+  upsertChatSession(
+    input: DesktopChatSessionUpsertRequest,
+  ): DesktopChatSessionList["data"][number] {
+    const now = new Date().toISOString();
+    return {
+      id: input.id ?? `session_${Date.now()}`,
+      ...(input.title ? { title: input.title } : {}),
+      ...(input.modelId ? { modelId: input.modelId } : {}),
+      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      metadata: {},
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  runChat(input: DesktopChatRunRequest, traceId?: string): DesktopChatRunResponse {
+    const session = this.upsertChatSession({
+      ...(input.sessionId ? { id: input.sessionId } : {}),
+      modelId: input.model,
+      title: input.message.slice(0, 80),
+      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+    });
+    const now = new Date().toISOString();
+    const response = this.createChatCompletion(
+      {
+        model: input.model,
+        stream: false,
+        messages: [{ role: "user", content: input.message }],
+      },
+      { traceId: createTraceId(traceId) },
+    );
+
+    return {
+      session,
+      userMessage: {
+        id: `message_${Date.now()}`,
+        sessionId: session.id,
+        role: "user",
+        content: input.message,
+        toolCalls: [],
+        metadata: {},
+        createdAt: now,
+      },
+      assistantMessage: {
+        id: `message_${Date.now() + 1}`,
+        sessionId: session.id,
+        role: "assistant",
+        content: response.choices[0]?.message.content as string | null,
+        toolCalls: response.choices[0]?.message.tool_calls ?? [],
+        metadata: {},
+        createdAt: now,
+      },
+      response,
+    };
+  }
+
+  listRecentApiLogs(_limit = 30): DesktopApiLogList {
+    return {
+      object: "list",
+      data: [],
+    };
+  }
+
+  searchCatalog(query: string): DesktopProviderSearchResult {
+    const normalized = query.trim().toLowerCase();
+    const item = {
+      id: "https://example.invalid/mock/qwen2.5-7b-instruct-q4_k_m.gguf",
+      provider: "huggingface" as const,
+      providerModelId: "mock/qwen2.5-7b-instruct",
+      artifactId: "qwen2.5-7b-instruct-q4_k_m",
+      title: "Mock Qwen2.5 7B Instruct",
+      author: "mock",
+      summary: "Fixture provider result from the mock gateway runtime.",
+      description: "Fixture provider result from the mock gateway runtime.",
+      tags: ["gguf", "chat", "instruct"],
+      formats: ["gguf"],
+      downloads: 1200,
+      likes: 88,
+      updatedAt: new Date().toISOString(),
+      artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
+      downloadUrl: "https://example.invalid/qwen2.5-7b-instruct-q4_k_m.gguf",
+      sizeBytes: 4_000_000_000,
+      quantization: "Q4_K_M",
+      architecture: "llama",
+      checksumSha256: "a".repeat(64),
+      metadata: {},
+    };
+
+    return {
+      object: "list",
+      data: normalized.length === 0 || item.title.toLowerCase().includes(normalized) ? [item] : [],
+      warnings: [],
+    };
+  }
+
+  createDownload(
+    input: DesktopDownloadCreateRequest,
+    _traceId?: string,
+  ): DesktopDownloadActionResponse {
+    const task = {
+      id: `download-${Date.now()}`,
+      provider: input.provider,
+      title: input.title,
+      artifactName: input.artifactName,
+      status: "pending" as const,
+      progress: 0,
+      downloadedBytes: 0,
+      ...(input.sizeBytes !== undefined ? { totalBytes: input.sizeBytes } : {}),
+      ...(input.destinationPath ? { destinationPath: input.destinationPath } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.#downloads.unshift(task);
+    return {
+      accepted: true,
+      task,
+    };
+  }
+
+  pauseDownload(id: string, _traceId?: string): DesktopDownloadActionResponse {
+    const task = this.#downloads.find((entry) => entry.id === id);
+    if (!task) {
+      throw new Error(`Unknown download: ${id}`);
+    }
+
+    task.status = "paused";
+    task.updatedAt = new Date().toISOString();
+    return {
+      accepted: true,
+      task: structuredClone(task),
+    };
+  }
+
+  resumeDownload(id: string, _traceId?: string): DesktopDownloadActionResponse {
+    const task = this.#downloads.find((entry) => entry.id === id);
+    if (!task) {
+      throw new Error(`Unknown download: ${id}`);
+    }
+
+    task.status = "downloading";
+    task.updatedAt = new Date().toISOString();
+    return {
+      accepted: true,
+      task: structuredClone(task),
+    };
   }
 
   listEngines(): EngineRecord[] {
@@ -334,7 +536,12 @@ export class MockGatewayRuntime {
 
     const model = this.#models.get(modelId);
     if (model) {
-      this.publish(this.createModelStateEvent(model, { reason: "Model registered and ready to preload.", traceId }));
+      this.publish(
+        this.createModelStateEvent(model, {
+          reason: "Model registered and ready to preload.",
+          traceId,
+        }),
+      );
     }
     this.publishLog(
       "info",
@@ -400,6 +607,184 @@ export class MockGatewayRuntime {
     };
   }
 
+  createChatCompletion(
+    input: ChatCompletionsRequest,
+    context: GatewayExecutionContext,
+  ): ChatCompletionsResponse {
+    const model = this.getModel(input.model);
+    if (!model) {
+      throw new Error(`Unknown model: ${input.model}`);
+    }
+    if (!model.capabilities.includes("chat")) {
+      throw new GatewayRequestError(
+        "unsupported_model_capability",
+        `Model ${input.model} does not support chat requests.`,
+        409,
+      );
+    }
+
+    const created = Math.floor(Date.now() / 1000);
+    const userText =
+      [...input.messages].reverse().find((message) => message.role === "user")?.content ??
+      "Hello from the mock gateway";
+    const normalizedUserText =
+      typeof userText === "string" ? userText : JSON.stringify(userText ?? "");
+
+    this.transitionModel(model, "Busy", true, context.traceId, "Model is serving a request.");
+
+    try {
+      if (input.tools?.length) {
+        return {
+          id: `chatcmpl-${createTraceId(context.traceId)}`,
+          object: "chat.completion",
+          created,
+          model: input.model,
+          choices: [
+            {
+              index: 0,
+              finish_reason: "tool_calls",
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: `call-${createTraceId(context.traceId)}`,
+                    type: "function",
+                    function: {
+                      name: input.tools[0]?.function.name ?? "tool",
+                      arguments: JSON.stringify({ input: normalizedUserText }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: {
+            prompt_tokens: countTokens(normalizedUserText),
+            completion_tokens: 1,
+            total_tokens: countTokens(normalizedUserText) + 1,
+          },
+        };
+      }
+
+      const answer = `Mock response from ${input.model}: ${normalizedUserText}`;
+
+      return {
+        id: `chatcmpl-${createTraceId(context.traceId)}`,
+        object: "chat.completion",
+        created,
+        model: input.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: answer,
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: countTokens(normalizedUserText),
+          completion_tokens: countTokens(answer),
+          total_tokens: countTokens(normalizedUserText) + countTokens(answer),
+        },
+      };
+    } finally {
+      this.transitionModel(model, "Ready", true, context.traceId, "Chat completion finished.");
+    }
+  }
+
+  createChatCompletionStream(
+    input: ChatCompletionsRequest,
+    context: GatewayExecutionContext,
+  ): ChatCompletionsStreamResult {
+    const response = this.createChatCompletion({ ...input, stream: false }, context);
+    const encoder = new TextEncoder();
+    const chunks = [
+      `data: ${JSON.stringify({
+        id: response.id,
+        object: "chat.completion.chunk",
+        created: response.created,
+        model: response.model,
+        choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: response.id,
+        object: "chat.completion.chunk",
+        created: response.created,
+        model: response.model,
+        choices: response.choices[0]?.message.tool_calls
+          ? [
+              {
+                index: 0,
+                delta: { tool_calls: response.choices[0].message.tool_calls },
+                finish_reason: null,
+              },
+            ]
+          : [
+              {
+                index: 0,
+                delta: { content: response.choices[0]?.message.content ?? "" },
+                finish_reason: null,
+              },
+            ],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: response.id,
+        object: "chat.completion.chunk",
+        created: response.created,
+        model: response.model,
+        choices: [
+          { index: 0, delta: {}, finish_reason: response.choices[0]?.finish_reason ?? "stop" },
+        ],
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ];
+
+    return {
+      contentType: "text/event-stream; charset=utf-8",
+      stream: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+          controller.close();
+        },
+      }),
+    };
+  }
+
+  createEmbeddings(
+    input: EmbeddingsRequest,
+    _context: GatewayExecutionContext,
+  ): EmbeddingsResponse {
+    const model = this.getModel(input.model);
+    if (!model) {
+      throw new Error(`Unknown model: ${input.model}`);
+    }
+    if (!model.capabilities.includes("embeddings")) {
+      throw new GatewayRequestError(
+        "unsupported_model_capability",
+        `Model ${input.model} does not support embeddings requests.`,
+        409,
+      );
+    }
+
+    const values = Array.isArray(input.input) ? input.input : [input.input];
+    return {
+      object: "list",
+      model: input.model,
+      data: values.map((value, index) => ({
+        object: "embedding",
+        index,
+        embedding: Array.from({ length: 8 }, (_, position) =>
+          Number((((value.length + 1) * (position + 3)) / 100).toFixed(6)),
+        ),
+      })),
+    };
+  }
+
   recordRequestTrace(payload: RequestTraceRecord): void {
     const route = mapRequestRoute(payload.method, payload.path);
     if (!route) {
@@ -457,7 +842,10 @@ export class MockGatewayRuntime {
       capabilities: model?.capabilities ?? existing?.capabilities ?? ["chat"],
       role: getModelRole(model ?? createModel(modelId, Math.floor(Date.now() / 1000), ["chat"])),
       tags: existing?.tags ?? ["mock"],
-      localPath: overrides.localPath ?? existing?.localPath ?? `/mock/models/${slugifyFileName(modelId)}.gguf`,
+      localPath:
+        overrides.localPath ??
+        existing?.localPath ??
+        `/mock/models/${slugifyFileName(modelId)}.gguf`,
       sourceKind: "local",
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
@@ -469,7 +857,9 @@ export class MockGatewayRuntime {
       engineVersion: this.#engines[0]?.version,
       engineChannel: this.#engines[0]?.channel,
       lastUsedAt: existing?.lastUsedAt,
-      createdAt: existing?.createdAt ?? new Date((model?.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
+      createdAt:
+        existing?.createdAt ??
+        new Date((model?.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
       updatedAt: existing?.updatedAt ?? new Date().toISOString(),
       ...(model?.lastError ? { errorMessage: model.lastError } : {}),
     };
