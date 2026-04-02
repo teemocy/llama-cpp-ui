@@ -52,9 +52,13 @@ process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
 
 start("pnpm", ["--filter", "@localhub/shared-contracts", "dev"], workspaceRoot);
-start("pnpm", ["--filter", "@localhub/platform", "build", "--", "--watch"], workspaceRoot);
-start("pnpm", ["--filter", "@localhub/ui", "build", "--", "--watch"], workspaceRoot);
-start("pnpm", ["--filter", "@localhub/gateway", "build", "--", "--watch"], workspaceRoot);
+start("pnpm", ["exec", "tsc", "-b", "--watch"], path.join(workspaceRoot, "packages", "platform"));
+start("pnpm", ["exec", "tsc", "-b", "--watch"], path.join(workspaceRoot, "packages", "ui"));
+start(
+  "pnpm",
+  ["exec", "tsc", "-p", "tsconfig.json", "--watch"],
+  path.join(workspaceRoot, "services", "gateway"),
+);
 start("pnpm", ["run", "build:main", "--", "--watch"], desktopDir);
 start("pnpm", ["exec", "vite"], desktopDir, { BROWSER: "none" });
 
