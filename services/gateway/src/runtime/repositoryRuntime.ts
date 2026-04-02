@@ -9,6 +9,7 @@ import {
   DownloadTasksRepository,
   EngineVersionsRepository,
   ModelsRepository,
+  PromptCachesRepository,
   type StoredModelRecord,
   openDatabase,
 } from "@localhub/db";
@@ -35,6 +36,8 @@ import {
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
   type DesktopLocalModelImportResponse,
+  type DesktopModelConfigUpdateRequest,
+  type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
   type DesktopProviderSearchResult,
@@ -49,6 +52,7 @@ import {
   desktopDownloadActionResponseSchema,
   desktopDownloadListSchema,
   desktopLocalModelImportRequestSchema,
+  desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
@@ -89,6 +93,14 @@ const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
 const DEFAULT_LOAD_TIMEOUT_MS = 5_000;
 const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 1_500;
+const DEFAULT_WORKER_STOP_TIMEOUT_MS = 2_000;
+const DEFAULT_MAX_RESIDENT_MEMORY_BYTES = 0;
+const DEFAULT_FAILURE_BACKOFF_MS = 250;
+const DEFAULT_FAILURE_BACKOFF_MAX_MS = 2_000;
+const DEFAULT_FAILURE_WINDOW_MS = 60_000;
+const DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 3;
+const DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS = 30_000;
 const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   chat: true,
   embeddings: true,
@@ -105,6 +117,14 @@ interface RepositoryGatewayRuntimeOptions {
   fakeWorkerStartupDelayMs?: number;
   providerSearch?: ProviderSearchService;
   downloadFetch?: typeof fetch;
+  shutdownDrainTimeoutMs?: number;
+  workerStopTimeoutMs?: number;
+  maxResidentMemoryBytes?: number;
+  failureBackoffMs?: number;
+  failureBackoffMaxMs?: number;
+  failureWindowMs?: number;
+  circuitBreakerThreshold?: number;
+  circuitBreakerCooldownMs?: number;
 }
 
 interface ResolvedModelRecord {
@@ -129,11 +149,19 @@ interface ManagedWorker {
   harness: Awaited<ReturnType<typeof createLlamaCppHarness>>;
   inflightRequests: number;
   intentionalStop: boolean;
+  lastUsedAt: number;
   loadedAt: string;
   profile: ModelProfile;
   runtimeKey: RuntimeEventKey;
   runtimeKeyString: string;
   state: WorkerState;
+}
+
+interface WorkerFailureState {
+  breakerOpenUntil?: number | undefined;
+  failureTimestamps: number[];
+  lastReason?: string | undefined;
+  nextRetryAt?: number | undefined;
 }
 
 function normalizeTraceId(value: string | undefined): string {
@@ -559,6 +587,11 @@ function toDesktopModelRecord(
     ...(stored.artifact.metadata.tokenizer
       ? { tokenizer: stored.artifact.metadata.tokenizer }
       : {}),
+    ...(typeof profile.parameterOverrides.gpuLayers === "number" &&
+    Number.isFinite(profile.parameterOverrides.gpuLayers) &&
+    profile.parameterOverrides.gpuLayers > 0
+      ? { gpuLayers: Math.floor(profile.parameterOverrides.gpuLayers) }
+      : {}),
     ...(stored.artifact.source.checksumSha256
       ? { checksumSha256: stored.artifact.source.checksumSha256 }
       : {}),
@@ -656,11 +689,22 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #subscribers = new Set<(event: GatewayEvent) => void>();
   readonly #supportRoot: string;
   readonly #telemetryIntervalMs: number;
+  readonly #shutdownDrainTimeoutMs: number;
+  readonly #workerStopTimeoutMs: number;
+  readonly #maxResidentMemoryBytes: number;
+  readonly #failureBackoffMs: number;
+  readonly #failureBackoffMaxMs: number;
+  readonly #failureWindowMs: number;
+  readonly #circuitBreakerThreshold: number;
+  readonly #circuitBreakerCooldownMs: number;
 
   #started = false;
+  #stopping = false;
+  #stopPromise: Promise<void> | undefined;
   #telemetryTimer: NodeJS.Timeout | undefined;
   #loadPromises = new Map<string, Promise<ManagedWorker>>();
   #modelSnapshots = new Map<string, RuntimeSnapshot>();
+  #workerFailures = new Map<string, WorkerFailureState>();
   #workers = new Map<string, ManagedWorker>();
 
   constructor(options: RepositoryGatewayRuntimeOptions) {
@@ -683,9 +727,22 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#supportRoot = appPaths.supportRoot;
     this.#telemetryIntervalMs = options.telemetryIntervalMs;
     this.#defaultModelTtlMs = options.defaultModelTtlMs;
+    this.#shutdownDrainTimeoutMs =
+      options.shutdownDrainTimeoutMs ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
+    this.#workerStopTimeoutMs = options.workerStopTimeoutMs ?? DEFAULT_WORKER_STOP_TIMEOUT_MS;
+    this.#maxResidentMemoryBytes =
+      options.maxResidentMemoryBytes ?? DEFAULT_MAX_RESIDENT_MEMORY_BYTES;
+    this.#failureBackoffMs = options.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS;
+    this.#failureBackoffMaxMs = options.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS;
+    this.#failureWindowMs = options.failureWindowMs ?? DEFAULT_FAILURE_WINDOW_MS;
+    this.#circuitBreakerThreshold =
+      options.circuitBreakerThreshold ?? DEFAULT_CIRCUIT_BREAKER_THRESHOLD;
+    this.#circuitBreakerCooldownMs =
+      options.circuitBreakerCooldownMs ?? DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS;
     this.#modelsRepository = new ModelsRepository(database);
     this.#enginesRepository = new EngineVersionsRepository(database);
     this.#downloadsRepository = new DownloadTasksRepository(database);
+    const promptCachesRepository = new PromptCachesRepository(database);
     this.#chatRepository = new ChatRepository(database);
     this.#adapter = createLlamaCppAdapter({
       supportRoot: this.#supportRoot,
@@ -702,6 +759,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       adapter: this.#adapter,
       modelsRepository: this.#modelsRepository,
       engineVersionsRepository: this.#enginesRepository,
+      promptCachesRepository,
     });
     this.#downloadManager = new LlamaCppDownloadManager({
       supportRoot: this.#supportRoot,
@@ -721,6 +779,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     this.#started = true;
+    this.#stopping = false;
     this.publishLog(
       "info",
       "Repository-backed gateway runtime started.",
@@ -736,17 +795,53 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   async stop(): Promise<void> {
+    if (this.#stopPromise) {
+      return this.#stopPromise;
+    }
+
+    this.#stopPromise = this.performStop();
+    return this.#stopPromise;
+  }
+
+  private async performStop(): Promise<void> {
+    this.#stopping = true;
     if (this.#telemetryTimer) {
       clearInterval(this.#telemetryTimer);
       this.#telemetryTimer = undefined;
     }
 
+    this.publishLog(
+      "info",
+      "Repository-backed gateway runtime is draining active work before shutdown.",
+      undefined,
+      undefined,
+      "system",
+    );
+
+    const drained = await this.waitForDrain(this.#shutdownDrainTimeoutMs);
+    if (!drained) {
+      this.publishLog(
+        "warn",
+        "Gateway shutdown drain timed out; forcing worker cleanup.",
+        undefined,
+        undefined,
+        "system",
+      );
+    }
+
     const activeWorkers = Array.from(this.#workers.values());
     await Promise.allSettled(
       activeWorkers.map((worker) =>
-        this.stopWorker(worker, normalizeTraceId(undefined), "Gateway shutdown requested."),
+        this.stopWorker(
+          worker,
+          normalizeTraceId(undefined),
+          drained
+            ? "Gateway shutdown requested."
+            : "Gateway shutdown forced cleanup after drain timeout.",
+        ),
       ),
     );
+    await Promise.allSettled(Array.from(this.#loadPromises.values()));
     this.#workers.clear();
     this.#loadPromises.clear();
 
@@ -1005,6 +1100,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     input: DesktopDownloadCreateRequest,
     _traceId?: string,
   ): Promise<DesktopDownloadActionResponse> {
+    this.assertAcceptingNewWork();
     const task = await this.#downloadManager.startDownload({
       provider: input.provider,
       providerModelId: input.providerModelId,
@@ -1054,6 +1150,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     input: Parameters<GatewayRuntime["registerLocalModel"]>[0],
     traceId?: string,
   ): Promise<DesktopLocalModelImportResponse> {
+    this.assertAcceptingNewWork();
     const parsedInput = desktopLocalModelImportRequestSchema.parse(input);
     const normalizedPath = path.resolve(parsedInput.filePath);
     const existing = this.#modelsRepository
@@ -1106,7 +1203,57 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     };
   }
 
+  updateModelConfig(
+    modelId: string,
+    input: DesktopModelConfigUpdateRequest,
+    _traceId?: string,
+  ): DesktopModelConfigUpdateResponse {
+    const resolved = this.resolveModelRecord(modelId);
+
+    if (this.#workers.has(resolved.runtimeKeyString)) {
+      throw new GatewayRequestError(
+        "model_config_requires_cold_state",
+        "Evict the model from memory before changing advanced runtime settings.",
+        409,
+      );
+    }
+
+    const nextProfile: ModelProfile = {
+      ...resolved.profile,
+      ...(input.displayName ? { displayName: input.displayName } : {}),
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
+      parameterOverrides: {
+        ...resolved.profile.parameterOverrides,
+        ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+        ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+      },
+      updatedAt: nowIso(),
+    };
+
+    this.#modelsRepository.save(resolved.artifact, nextProfile);
+
+    const refreshedStored = this.#modelsRepository.findById(modelId);
+    if (!refreshedStored) {
+      throw new Error(`Updated model ${modelId} could not be reloaded.`);
+    }
+
+    const activeEngine = this.#enginesRepository
+      .list()
+      .find((record) => record.engineType === nextProfile.engineType && record.isActive);
+
+    return desktopModelConfigUpdateResponseSchema.parse({
+      model: toDesktopModelRecord(
+        refreshedStored,
+        nextProfile,
+        this.#modelSnapshots.get(modelId),
+        activeEngine,
+      ),
+    });
+  }
+
   async preloadModel(modelId: string, traceId?: string): Promise<PreloadModelResult> {
+    this.assertAcceptingNewWork();
     const resolved = this.resolveModelRecord(modelId);
     const existingWorker = this.#workers.get(resolved.runtimeKeyString);
 
@@ -1418,6 +1565,38 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
+  private assertAcceptingNewWork(): void {
+    if (this.#stopping) {
+      throw new GatewayRequestError(
+        "gateway_stopping",
+        "The gateway is shutting down and is not accepting new work.",
+        503,
+      );
+    }
+  }
+
+  private async waitForDrain(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      if (
+        this.#loadPromises.size === 0 &&
+        Array.from(this.#workers.values()).every((worker) => worker.inflightRequests === 0)
+      ) {
+        return true;
+      }
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 25);
+      });
+    }
+
+    return (
+      this.#loadPromises.size === 0 &&
+      Array.from(this.#workers.values()).every((worker) => worker.inflightRequests === 0)
+    );
+  }
+
   private getProfile(stored: StoredModelRecord): ModelProfile {
     return stored.profile ?? createDefaultProfile(stored.artifact, this.#defaultModelTtlMs);
   }
@@ -1479,6 +1658,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     capability: "chat" | "embeddings",
     traceId: string,
   ): Promise<ManagedWorker> {
+    this.assertAcceptingNewWork();
     const resolved = this.resolveModelRecord(modelId);
     this.ensureModelCapability(resolved, capability);
     await this.preloadModel(modelId, traceId);
@@ -1501,6 +1681,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     worker.inflightRequests += 1;
+    worker.lastUsedAt = Date.now();
     worker.state = "Busy";
     this.publish(
       this.createModelStateEvent(worker.artifact, "Busy", {
@@ -1525,6 +1706,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     const previousState = worker.state;
+    worker.lastUsedAt = Date.now();
     worker.state = "Ready";
     this.publish(
       this.createModelStateEvent(worker.artifact, "Ready", {
@@ -1625,7 +1807,184 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#chatRepository.insertApiLog(record);
   }
 
+  private getResidentMemoryBytes(): number {
+    return Array.from(this.#workers.values()).reduce(
+      (total, worker) => total + worker.artifact.sizeBytes,
+      0,
+    );
+  }
+
+  private getFailureState(runtimeKeyString: string): WorkerFailureState {
+    const existing = this.#workerFailures.get(runtimeKeyString);
+    if (existing) {
+      return existing;
+    }
+
+    const created: WorkerFailureState = {
+      failureTimestamps: [],
+    };
+    this.#workerFailures.set(runtimeKeyString, created);
+    return created;
+  }
+
+  private clearFailureState(runtimeKeyString: string): void {
+    this.#workerFailures.delete(runtimeKeyString);
+  }
+
+  private normalizeFailureWindow(state: WorkerFailureState, now: number): number {
+    state.failureTimestamps = state.failureTimestamps.filter(
+      (timestamp) => now - timestamp <= this.#failureWindowMs,
+    );
+    return state.failureTimestamps.length;
+  }
+
+  private openWorkerCircuit(
+    resolved: Pick<ResolvedModelRecord, "artifact">,
+    failureState: WorkerFailureState,
+    failureCount: number,
+    now: number,
+    traceId?: string,
+  ): void {
+    failureState.breakerOpenUntil = now + this.#circuitBreakerCooldownMs;
+    failureState.nextRetryAt = undefined;
+    this.publishLog(
+      "warn",
+      `Worker circuit opened for ${resolved.artifact.id} after ${failureCount} failures in ${this.#failureWindowMs}ms.`,
+      traceId,
+      resolved.artifact.id,
+      "gateway",
+    );
+  }
+
+  private assertWorkerLoadAllowed(resolved: ResolvedModelRecord, traceId: string): void {
+    const failureState = this.#workerFailures.get(resolved.runtimeKeyString);
+    if (!failureState) {
+      return;
+    }
+
+    const now = Date.now();
+    this.normalizeFailureWindow(failureState, now);
+
+    if (failureState.breakerOpenUntil && failureState.breakerOpenUntil > now) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((failureState.breakerOpenUntil - now) / 1000),
+      );
+      throw new GatewayRequestError(
+        "worker_circuit_open",
+        `Model ${resolved.artifact.id} is cooling down after repeated worker failures. Retry in ${retryAfterSeconds}s.`,
+        503,
+      );
+    }
+
+    if (failureState.nextRetryAt && failureState.nextRetryAt > now) {
+      failureState.failureTimestamps.push(now);
+      failureState.lastReason = "Retry requested during worker backoff window.";
+      const failureCount = failureState.failureTimestamps.length;
+      if (failureCount >= this.#circuitBreakerThreshold) {
+        this.openWorkerCircuit(resolved, failureState, failureCount, now, traceId);
+        const retryAfterSeconds = Math.max(1, Math.ceil(this.#circuitBreakerCooldownMs / 1000));
+        throw new GatewayRequestError(
+          "worker_circuit_open",
+          `Model ${resolved.artifact.id} is cooling down after repeated worker failures. Retry in ${retryAfterSeconds}s.`,
+          503,
+        );
+      }
+
+      const retryAfterMs = Math.max(1, failureState.nextRetryAt - now);
+      throw new GatewayRequestError(
+        "worker_backoff",
+        `Model ${resolved.artifact.id} is backing off after a worker failure. Retry in ${retryAfterMs}ms.`,
+        503,
+      );
+    }
+  }
+
+  private recordWorkerFailure(
+    resolved: Pick<ResolvedModelRecord, "artifact" | "runtimeKeyString">,
+    traceId: string,
+    reason: string,
+  ): void {
+    const now = Date.now();
+    const failureState = this.getFailureState(resolved.runtimeKeyString);
+    this.normalizeFailureWindow(failureState, now);
+    failureState.failureTimestamps.push(now);
+    failureState.lastReason = reason;
+    const failureCount = failureState.failureTimestamps.length;
+
+    failureState.nextRetryAt =
+      now +
+      Math.min(
+        this.#failureBackoffMaxMs,
+        Math.max(this.#failureBackoffMs, this.#failureBackoffMs * failureCount),
+      );
+
+    if (failureCount >= this.#circuitBreakerThreshold) {
+      this.openWorkerCircuit(resolved, failureState, failureCount, now, traceId);
+    }
+  }
+
+  private async enforceResidentMemoryBudget(
+    resolved: ResolvedModelRecord,
+    traceId: string,
+  ): Promise<void> {
+    if (this.#maxResidentMemoryBytes <= 0) {
+      return;
+    }
+
+    if (resolved.artifact.sizeBytes > this.#maxResidentMemoryBytes) {
+      throw new GatewayRequestError(
+        "resource_exhausted",
+        `Model ${resolved.artifact.id} exceeds the configured resident memory budget.`,
+        503,
+      );
+    }
+
+    let residentMemoryBytes = this.getResidentMemoryBytes();
+    if (residentMemoryBytes + resolved.artifact.sizeBytes <= this.#maxResidentMemoryBytes) {
+      return;
+    }
+
+    const evictionCandidates = Array.from(this.#workers.values())
+      .filter(
+        (worker) =>
+          worker.runtimeKeyString !== resolved.runtimeKeyString &&
+          worker.inflightRequests === 0 &&
+          worker.state === "Ready",
+      )
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+
+    for (const worker of evictionCandidates) {
+      if (residentMemoryBytes + resolved.artifact.sizeBytes <= this.#maxResidentMemoryBytes) {
+        break;
+      }
+
+      this.publishLog(
+        "info",
+        `Evicting ${worker.artifact.id} under resident memory pressure to load ${resolved.artifact.id}.`,
+        traceId,
+        worker.artifact.id,
+        "gateway",
+      );
+      residentMemoryBytes -= worker.artifact.sizeBytes;
+      await this.stopWorker(
+        worker,
+        traceId,
+        `Evicted under resident memory pressure to load ${resolved.artifact.id}.`,
+      );
+    }
+
+    if (residentMemoryBytes + resolved.artifact.sizeBytes > this.#maxResidentMemoryBytes) {
+      throw new GatewayRequestError(
+        "resource_exhausted",
+        `Not enough resident memory budget to load ${resolved.artifact.id}.`,
+        503,
+      );
+    }
+  }
+
   private async loadWorker(resolved: ResolvedModelRecord, traceId: string): Promise<ManagedWorker> {
+    this.assertWorkerLoadAllowed(resolved, traceId);
     const previousState = this.#modelSnapshots.get(resolved.artifact.id)?.state ?? "Idle";
     this.publish(
       this.createModelStateEvent(resolved.artifact, "Loading", {
@@ -1641,6 +2000,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         throw new Error(getMissingArtifactMessage(resolved.artifact));
       }
 
+      await this.enforceResidentMemoryBudget(resolved, traceId);
+
       const harness = await createLlamaCppHarness(this.#adapter, {
         artifact: resolved.artifact,
         profile: resolved.profile,
@@ -1648,12 +2009,22 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         supportRoot: this.#supportRoot,
       });
 
+      if (this.#stopping) {
+        await harness.stop(this.#workerStopTimeoutMs).catch(() => undefined);
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
+      }
+
       const worker: ManagedWorker = {
         artifact: resolved.artifact,
         evictionTimer: undefined,
         harness,
         inflightRequests: 0,
         intentionalStop: false,
+        lastUsedAt: Date.now(),
         loadedAt: nowIso(),
         profile: resolved.profile,
         runtimeKey: resolved.runtimeKey,
@@ -1665,6 +2036,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       this.attachWorkerLogging(worker);
       this.attachWorkerExitListener(worker);
       this.persistEngineRecord(harness.command);
+
+      if (this.#stopping) {
+        await this.stopWorker(
+          worker,
+          traceId,
+          "Gateway shutdown interrupted model startup before readiness.",
+        );
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
+      }
 
       await Promise.race([
         harness.waitForReady(DEFAULT_LOAD_TIMEOUT_MS),
@@ -1678,6 +2062,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           });
         }),
       ]);
+
+      if (this.#stopping) {
+        await this.stopWorker(
+          worker,
+          traceId,
+          "Gateway shutdown interrupted model startup after readiness.",
+        );
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
+      }
 
       worker.loadedAt = nowIso();
       worker.state = "Ready";
@@ -1698,6 +2095,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         }),
       );
       this.refreshTtl(worker);
+      this.clearFailureState(resolved.runtimeKeyString);
 
       return worker;
     } catch (error) {
@@ -1724,6 +2122,11 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           traceId,
         }),
       );
+      this.recordWorkerFailure(
+        resolved,
+        traceId,
+        error instanceof Error ? error.message : "Worker load failed.",
+      );
       throw error;
     }
   }
@@ -1746,7 +2149,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       }),
     );
 
-    await worker.harness.stop().catch((error: unknown) => {
+    await worker.harness.stop(this.#workerStopTimeoutMs).catch((error: unknown) => {
       this.publishLog(
         "warn",
         error instanceof Error ? error.message : "Worker stop failed.",
@@ -1853,6 +2256,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         worker.artifact.id,
         "worker",
       );
+      this.recordWorkerFailure(
+        {
+          artifact: worker.artifact,
+          runtimeKeyString: worker.runtimeKeyString,
+        },
+        normalizeTraceId(undefined),
+        `Worker exited unexpectedly (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
+      );
       this.publish(
         this.createModelStateEvent(worker.artifact, "Crashed", {
           previousState: worker.state,
@@ -1927,10 +2338,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const activeWorkers = Array.from(this.#modelSnapshots.values()).filter(
       (snapshot) => snapshot.loaded,
     ).length;
-    const residentMemoryBytes = Array.from(this.#workers.values()).reduce(
-      (total, worker) => total + worker.artifact.sizeBytes,
-      0,
-    );
+    const residentMemoryBytes = this.getResidentMemoryBytes();
 
     return {
       type: "METRICS_TICK",

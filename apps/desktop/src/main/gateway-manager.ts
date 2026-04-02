@@ -1,4 +1,4 @@
-import { type ChildProcessByStdio, spawn } from "node:child_process";
+import { type ChildProcess, type ChildProcessByStdio, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
@@ -20,6 +20,8 @@ import {
   type DesktopEngineList,
   type DesktopLocalModelImportRequest,
   type DesktopLocalModelImportResponse,
+  type DesktopModelConfigUpdateRequest,
+  type DesktopModelConfigUpdateResponse,
   type DesktopModelLibrary,
   type DesktopModelRecord,
   type DesktopProviderSearchResult,
@@ -38,6 +40,7 @@ import {
   desktopDownloadListSchema,
   desktopEngineListSchema,
   desktopLocalModelImportResponseSchema,
+  desktopModelConfigUpdateResponseSchema,
   desktopModelLibrarySchema,
   desktopProviderSearchResultSchema,
   desktopShellStateSchema,
@@ -82,6 +85,12 @@ export type DesktopSystemPaths = {
   discoveryFile: string;
 };
 
+export type DesktopRuntimeEnvironment = "development" | "packaged" | "test";
+
+const DEFAULT_GATEWAY_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
+const DEFAULT_GATEWAY_TERM_EXIT_TIMEOUT_MS = 2_000;
+const DEFAULT_GATEWAY_KILL_EXIT_TIMEOUT_MS = 1_000;
+
 const resolveGatewayEntrypoint = (workspaceRoot: string): string => {
   const candidatePaths = [
     path.join(workspaceRoot, "services", "gateway", "dist", "index.js"),
@@ -104,6 +113,30 @@ const sleep = async (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
+export const waitForChildExit = async (
+  child: Pick<ChildProcess, "exitCode" | "signalCode" | "once" | "off">,
+  timeoutMs: number,
+): Promise<boolean> => {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    const handleExit = () => {
+      clearTimeout(timeoutId);
+      child.off("exit", handleExit);
+      resolve(true);
+    };
+
+    const timeoutId = setTimeout(() => {
+      child.off("exit", handleExit);
+      resolve(false);
+    }, timeoutMs);
+
+    child.once("exit", handleExit);
+  });
+};
+
 const pickFirstNonEmpty = (...values: Array<string | undefined>): string | undefined => {
   for (const value of values) {
     const normalized = value?.trim();
@@ -113,6 +146,22 @@ const pickFirstNonEmpty = (...values: Array<string | undefined>): string | undef
   }
 
   return undefined;
+};
+
+export const resolveDesktopRuntimeEnvironment = (
+  workspaceRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): DesktopRuntimeEnvironment => {
+  const explicitEnvironment = env.LOCAL_LLM_HUB_ENV;
+  if (
+    explicitEnvironment === "development" ||
+    explicitEnvironment === "packaged" ||
+    explicitEnvironment === "test"
+  ) {
+    return explicitEnvironment;
+  }
+
+  return existsSync(path.join(workspaceRoot, "pnpm-workspace.yaml")) ? "development" : "packaged";
 };
 
 export const resolveControlBearerToken = (
@@ -238,6 +287,9 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "POST /control/engines":
       return signature as RequestRoute;
     default:
+      if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(pathName)) {
+        return "PUT /config/models/:id";
+      }
       return null;
   }
 };
@@ -282,6 +334,7 @@ export class GatewayManager extends EventEmitter {
   private discovery: GatewayDiscoveryFile | undefined;
   private stopping = false;
   private readonly controlBearerToken = resolveControlBearerToken();
+  private readonly runtimeEnvironment: DesktopRuntimeEnvironment;
   private readonly stateValue: DesktopShellState = desktopShellStateSchema.parse({
     phase: "idle",
     progress: 0,
@@ -298,8 +351,10 @@ export class GatewayManager extends EventEmitter {
     super();
 
     const workspaceRoot = workspaceRootOverride ?? path.resolve(__dirname, "..", "..", "..");
+    this.runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
     const appPaths = resolveAppPaths({
       cwd: workspaceRoot,
+      environment: this.runtimeEnvironment,
     });
 
     this.paths = {
@@ -467,6 +522,25 @@ export class GatewayManager extends EventEmitter {
     return desktopLocalModelImportResponseSchema.parse(json);
   }
 
+  async updateModelConfig(
+    modelId: string,
+    payload: DesktopModelConfigUpdateRequest,
+  ): Promise<DesktopModelConfigUpdateResponse> {
+    const discovery = this.requireDiscovery();
+    const json = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/config/models/${encodeURIComponent(modelId)}`, {
+        method: "PUT",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(payload),
+      }),
+      `Unable to update ${modelId} configuration.`,
+    );
+
+    return desktopModelConfigUpdateResponseSchema.parse(json);
+  }
+
   async preloadModel(modelId: string): Promise<void> {
     const discovery = this.requireDiscovery();
     await this.readJsonResponse(
@@ -520,7 +594,9 @@ export class GatewayManager extends EventEmitter {
     return desktopChatMessageListSchema.parse(payload);
   }
 
-  async upsertChatSession(input: DesktopChatSessionUpsertRequest): Promise<DesktopChatSessionList["data"][number]> {
+  async upsertChatSession(
+    input: DesktopChatSessionUpsertRequest,
+  ): Promise<DesktopChatSessionList["data"][number]> {
     const discovery = this.requireDiscovery();
     const payload = await this.readJsonResponse(
       fetch(`${discovery.controlBaseUrl}/control/chat/sessions`, {
@@ -588,7 +664,9 @@ export class GatewayManager extends EventEmitter {
     return desktopDownloadListSchema.parse(payload);
   }
 
-  async createDownload(input: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse> {
+  async createDownload(
+    input: DesktopDownloadCreateRequest,
+  ): Promise<DesktopDownloadActionResponse> {
     const discovery = this.requireDiscovery();
     const payload = await this.readJsonResponse(
       fetch(`${discovery.controlBaseUrl}/control/downloads`, {
@@ -638,6 +716,16 @@ export class GatewayManager extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopping = true;
+    this.controlSocket?.close();
+    this.controlSocket = undefined;
+
+    const child = this.child;
+    if (!child) {
+      this.discovery = undefined;
+      return;
+    }
+
+    let exited = false;
 
     if (this.discovery) {
       try {
@@ -645,17 +733,38 @@ export class GatewayManager extends EventEmitter {
           method: "POST",
           headers: this.createControlHeaders(),
         });
+        exited = await waitForChildExit(child, DEFAULT_GATEWAY_GRACEFUL_EXIT_TIMEOUT_MS);
       } catch {
         /* noop */
       }
     }
 
-    this.controlSocket?.close();
-
-    if (this.child) {
-      this.child.kill("SIGTERM");
-      await sleep(500);
+    if (!exited) {
+      child.kill("SIGTERM");
+      exited = await waitForChildExit(child, DEFAULT_GATEWAY_TERM_EXIT_TIMEOUT_MS);
     }
+
+    if (!exited) {
+      child.kill("SIGKILL");
+      exited = await waitForChildExit(child, DEFAULT_GATEWAY_KILL_EXIT_TIMEOUT_MS);
+    }
+
+    this.discovery = undefined;
+
+    if (!exited) {
+      throw new Error("Gateway process did not exit after the shutdown request.");
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    await this.stop();
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    this.stopping = false;
+    this.discovery = undefined;
+    await this.start();
   }
 
   private requireDiscovery(): GatewayDiscoveryFile {
@@ -666,9 +775,7 @@ export class GatewayManager extends EventEmitter {
     return this.discovery;
   }
 
-  private createControlHeaders(
-    extraHeaders: Record<string, string> = {},
-  ): Record<string, string> {
+  private createControlHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
     return buildControlHeaders(this.controlBearerToken, extraHeaders);
   }
 
@@ -695,6 +802,7 @@ export class GatewayManager extends EventEmitter {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         LOCAL_LLM_HUB_APP_SUPPORT_DIR: this.paths.supportDir,
+        LOCAL_LLM_HUB_ENV: this.runtimeEnvironment,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

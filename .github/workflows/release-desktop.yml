@@ -1,0 +1,42 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-release:
+    runs-on: macos-latest
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate workspace
+        run: pnpm validate
+
+      - name: Package desktop app bundle
+        run: pnpm package:desktop:macos
+
+      - name: Sign, notarize, staple, and verify desktop app
+        run: pnpm notarize:desktop:macos
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-llm-hub-macos-signed
+          path: release/macos

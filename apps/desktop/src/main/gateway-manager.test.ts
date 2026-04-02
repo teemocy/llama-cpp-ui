@@ -1,6 +1,12 @@
+import { spawn } from "node:child_process";
+
 import { describe, expect, it } from "vitest";
 
-import { buildControlHeaders, resolveControlBearerToken } from "./gateway-manager";
+import {
+  buildControlHeaders,
+  resolveControlBearerToken,
+  waitForChildExit,
+} from "./gateway-manager";
 
 describe("gateway manager auth helpers", () => {
   it("matches gateway control-token precedence", () => {
@@ -40,5 +46,28 @@ describe("gateway manager auth helpers", () => {
     });
 
     expect(buildControlHeaders(undefined)).toEqual({});
+  });
+
+  it("waits for a child process to exit within the graceful timeout", async () => {
+    const child = spawn(process.execPath, [
+      "--input-type=module",
+      "-e",
+      "setTimeout(() => process.exit(0), 50);",
+    ]);
+
+    await expect(waitForChildExit(child, 500)).resolves.toBe(true);
+  });
+
+  it("returns false when a child process stays alive past the timeout", async () => {
+    const child = spawn(process.execPath, [
+      "--input-type=module",
+      "-e",
+      "setTimeout(() => process.exit(0), 500);",
+    ]);
+
+    await expect(waitForChildExit(child, 25)).resolves.toBe(false);
+
+    child.kill("SIGTERM");
+    await waitForChildExit(child, 500);
   });
 });

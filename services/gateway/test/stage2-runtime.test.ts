@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { GatewayConfig } from "../src/config.js";
 import { createRepositoryGatewayRuntime } from "../src/runtime/repositoryRuntime.js";
 import { buildGateway } from "../src/server/app.js";
+import { GatewayRequestError } from "../src/types.js";
 
 const migrationsDir = path.resolve(import.meta.dirname, "../../../packages/db/migrations");
 
@@ -82,6 +83,7 @@ async function writeSampleGgufFile(targetPath: string): Promise<void> {
 
 interface Stage2Fixture {
   appPaths: ReturnType<typeof resolveAppPaths>;
+  artifactPaths: Record<string, string>;
   cleanup: () => Promise<void>;
   runtime: ReturnType<typeof createRepositoryGatewayRuntime>;
 }
@@ -107,6 +109,27 @@ const embeddingsModelProfile = {
   displayName: "BGE Small Embed",
   role: "embeddings" as const,
 };
+const secondaryChatModelArtifact = {
+  ...fixtureModelArtifact,
+  id: "model_qwen25_chat_secondary",
+  name: "Qwen 2.5 Chat Secondary",
+  localPath: "/models/qwen2.5-chat-secondary.gguf",
+};
+const secondaryChatModelProfile = {
+  ...fixtureModelProfile,
+  id: "profile_qwen25_chat_secondary_default",
+  modelId: secondaryChatModelArtifact.id,
+  displayName: "Qwen 2.5 Chat Secondary",
+};
+
+interface CreateStage2FixtureOptions {
+  extraSeedModels?: Array<{
+    artifact: typeof fixtureModelArtifact;
+    fileName: string;
+    profile: typeof fixtureModelProfile;
+  }>;
+  runtimeOverrides?: Partial<Parameters<typeof createRepositoryGatewayRuntime>[0]>;
+}
 
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
@@ -123,7 +146,9 @@ function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig
   };
 }
 
-async function createStage2Fixture(): Promise<Stage2Fixture> {
+async function createStage2Fixture(
+  options: CreateStage2FixtureOptions = {},
+): Promise<Stage2Fixture> {
   const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage2-"));
   const appPaths = resolveAppPaths({
     cwd: process.cwd(),
@@ -137,6 +162,10 @@ async function createStage2Fixture(): Promise<Stage2Fixture> {
   const models = new ModelsRepository(seeded.database);
   const seededArtifactPath = path.join(appPaths.modelsDir, "fixture-qwen25-coder.gguf");
   const seededEmbeddingPath = path.join(appPaths.modelsDir, "fixture-bge-small-embed.gguf");
+  const artifactPaths: Record<string, string> = {
+    [fixtureModelArtifact.id]: seededArtifactPath,
+    [embeddingsModelArtifact.id]: seededEmbeddingPath,
+  };
 
   await writeSampleGgufFile(seededArtifactPath);
   await writeSampleGgufFile(seededEmbeddingPath);
@@ -155,6 +184,19 @@ async function createStage2Fixture(): Promise<Stage2Fixture> {
     },
     embeddingsModelProfile,
   );
+
+  for (const seedModel of options.extraSeedModels ?? []) {
+    const artifactPath = path.join(appPaths.modelsDir, seedModel.fileName);
+    artifactPaths[seedModel.artifact.id] = artifactPath;
+    await writeSampleGgufFile(artifactPath);
+    models.save(
+      {
+        ...seedModel.artifact,
+        localPath: artifactPath,
+      },
+      seedModel.profile,
+    );
+  }
   seeded.database.close();
 
   const runtime = createRepositoryGatewayRuntime({
@@ -168,11 +210,13 @@ async function createStage2Fixture(): Promise<Stage2Fixture> {
     preferFakeWorker: true,
     supportRoot,
     telemetryIntervalMs: 50,
+    ...options.runtimeOverrides,
   });
   await runtime.start();
 
   const fixture = {
     appPaths,
+    artifactPaths,
     async cleanup() {
       await runtime.stop();
       await rm(supportRoot, { recursive: true, force: true });
@@ -381,6 +425,93 @@ describe("gateway stage 2 runtime", () => {
     });
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("opens a worker circuit breaker after repeated load failures", async () => {
+    const fixture = await createStage2Fixture({
+      runtimeOverrides: {
+        failureBackoffMs: 50,
+        failureBackoffMaxMs: 50,
+        failureWindowMs: 500,
+        circuitBreakerThreshold: 2,
+        circuitBreakerCooldownMs: 1_000,
+      },
+    });
+
+    await rm(fixture.artifactPaths[fixtureModelArtifact.id] ?? "", { force: true });
+
+    await expect(
+      fixture.runtime.preloadModel(fixtureModelArtifact.id, "trace-fail-1"),
+    ).rejects.toThrow(/Local artifact is missing/);
+    await expect(
+      fixture.runtime.preloadModel(fixtureModelArtifact.id, "trace-fail-2"),
+    ).rejects.toMatchObject({
+      code: "worker_circuit_open",
+    } satisfies Partial<GatewayRequestError>);
+  });
+
+  it("evicts the least recently used idle worker under resident memory pressure", async () => {
+    const fixture = await createStage2Fixture({
+      extraSeedModels: [
+        {
+          artifact: secondaryChatModelArtifact,
+          profile: secondaryChatModelProfile,
+          fileName: "fixture-qwen25-chat-secondary.gguf",
+        },
+      ],
+      runtimeOverrides: {
+        maxResidentMemoryBytes: fixtureModelArtifact.sizeBytes + 1,
+      },
+    });
+
+    await fixture.runtime.preloadModel(fixtureModelArtifact.id, "trace-lru-1");
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+    await fixture.runtime.preloadModel(secondaryChatModelArtifact.id, "trace-lru-2");
+
+    const runtimeModels = fixture.runtime.listRuntimeModels();
+    expect(runtimeModels.find((model) => model.id === fixtureModelArtifact.id)?.loaded).toBe(false);
+    expect(runtimeModels.find((model) => model.id === secondaryChatModelArtifact.id)?.loaded).toBe(
+      true,
+    );
+  });
+
+  it("rejects new work once shutdown draining begins", async () => {
+    const fixture = await createStage2Fixture({
+      runtimeOverrides: {
+        fakeWorkerStartupDelayMs: 250,
+        shutdownDrainTimeoutMs: 50,
+      },
+    });
+
+    const preloadPromise = fixture.runtime
+      .preloadModel(fixtureModelArtifact.id, "trace-shutdown")
+      .catch((error: unknown) => error);
+    const stopPromise = fixture.runtime.stop();
+    await new Promise((resolve) => {
+      setTimeout(resolve, 10);
+    });
+
+    let error: unknown;
+    try {
+      await fixture.runtime.createDownload({
+        provider: "huggingface",
+        providerModelId: "acme/stage4-chat",
+        artifactId: "stage4-chat-q4",
+        title: "Stage4 Chat",
+        artifactName: "stage4-chat-q4.gguf",
+        downloadUrl: "https://example.invalid/stage4-chat-q4.gguf",
+        metadata: {},
+      });
+    } catch (reason) {
+      error = reason;
+    }
+
+    await Promise.allSettled([preloadPromise, stopPromise]);
+
+    expect(error).toBeInstanceOf(GatewayRequestError);
+    expect((error as GatewayRequestError).code).toBe("gateway_stopping");
   });
 
   it("fails preload before worker startup when a registered artifact has gone missing", async () => {

@@ -9,14 +9,59 @@ import {
   ipcMain,
   nativeImage,
 } from "electron";
+import {
+  loadDesktopConfig,
+  loadGatewayConfig as loadPlatformGatewayConfig,
+  resolveAppPaths,
+} from "@localhub/platform";
+import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
-import { GatewayManager } from "./gateway-manager";
+import { GatewayManager, resolveDesktopRuntimeEnvironment } from "./gateway-manager";
+
+export type DesktopRuntimeContext = {
+  desktop: {
+    closeToTray: boolean;
+    autoLaunchGateway: boolean;
+    theme: "system" | "light" | "dark";
+  };
+  gateway: {
+    enableLan: boolean;
+    authRequired: boolean;
+    publicHost: string;
+    controlHost: string;
+    corsAllowlist: string[];
+    defaultModelTtlMs: number;
+    authConfigured: boolean;
+  };
+  files: {
+    desktopConfigFile: string;
+    gatewayConfigFile: string;
+  };
+};
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let quitting = false;
 
+const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
+const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
 const gatewayManager = new GatewayManager();
+const appPaths = resolveAppPaths({
+  cwd: workspaceRoot,
+  environment: runtimeEnvironment,
+});
+const desktopConfig = loadDesktopConfig({
+  cwd: workspaceRoot,
+  environment: runtimeEnvironment,
+});
+const gatewayConfig = loadGatewayConfig({
+  cwd: workspaceRoot,
+  environment: runtimeEnvironment,
+});
+const sharedGatewayConfig = loadPlatformGatewayConfig({
+  cwd: workspaceRoot,
+  environment: runtimeEnvironment,
+});
 
 const relayToWindows = (channel: string, payload: unknown): void => {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -125,6 +170,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayRegisterLocalModel, (_event, payload) =>
     gatewayManager.registerLocalModel(payload),
   );
+  ipcMain.handle(IPC_CHANNELS.gatewayUpdateModelConfig, (_event, modelId: string, payload) =>
+    gatewayManager.updateModelConfig(modelId, payload),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayPreloadModel, (_event, modelId: string) =>
     gatewayManager.preloadModel(modelId),
   );
@@ -155,7 +203,34 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayResumeDownload, (_event, id: string) =>
     gatewayManager.resumeDownload(id),
   );
+  ipcMain.handle(IPC_CHANNELS.gatewayRestart, () => gatewayManager.restart());
+  ipcMain.handle(IPC_CHANNELS.gatewayShutdown, () => gatewayManager.shutdown());
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
+  ipcMain.handle(
+    IPC_CHANNELS.systemGetRuntimeContext,
+    (): DesktopRuntimeContext => ({
+      desktop: {
+        closeToTray: desktopConfig.value.closeToTray,
+        autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
+        theme: desktopConfig.value.theme,
+      },
+      gateway: {
+        enableLan: sharedGatewayConfig.value.enableLan,
+        authRequired: sharedGatewayConfig.value.authRequired,
+        publicHost: gatewayConfig.publicHost,
+        controlHost: gatewayConfig.controlHost,
+        corsAllowlist: [...gatewayConfig.corsAllowlist],
+        defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
+        authConfigured: Boolean(
+          gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken,
+        ),
+      },
+      files: {
+        desktopConfigFile: appPaths.desktopConfigFile,
+        gatewayConfigFile: appPaths.gatewayConfigFile,
+      },
+    }),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {
       title: "Pick a local model artifact",
