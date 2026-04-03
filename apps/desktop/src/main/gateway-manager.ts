@@ -55,6 +55,11 @@ type GatewayManagerEvents = {
   event: (event: GatewayEvent) => void;
 };
 
+type GatewayLaunchCommand = {
+  command: string;
+  useElectronRunAsNode: boolean;
+};
+
 type RawGatewayHealth = {
   status: "ok";
   plane: "public" | "control";
@@ -162,6 +167,29 @@ export const resolveDesktopRuntimeEnvironment = (
   }
 
   return existsSync(path.join(workspaceRoot, "pnpm-workspace.yaml")) ? "development" : "packaged";
+};
+
+export const resolveGatewayLaunchCommand = (
+  runtimeEnvironment: DesktopRuntimeEnvironment,
+  env: NodeJS.ProcessEnv = process.env,
+  execPath = process.execPath,
+): GatewayLaunchCommand => {
+  const nodeExecutable = pickFirstNonEmpty(
+    env.LOCAL_LLM_HUB_GATEWAY_NODE_EXECUTABLE,
+    env.npm_node_execpath,
+  );
+
+  if ((runtimeEnvironment === "development" || runtimeEnvironment === "test") && nodeExecutable) {
+    return {
+      command: nodeExecutable,
+      useElectronRunAsNode: false,
+    };
+  }
+
+  return {
+    command: execPath,
+    useElectronRunAsNode: true,
+  };
 };
 
 export const resolveControlBearerToken = (
@@ -795,15 +823,22 @@ export class GatewayManager extends EventEmitter {
 
   private spawnGatewayProcess(): ChildProcessByStdio<null, Readable, Readable> {
     const gatewayEntry = resolveGatewayEntrypoint(this.paths.workspaceRoot);
+    const launch = resolveGatewayLaunchCommand(this.runtimeEnvironment);
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      LOCAL_LLM_HUB_APP_SUPPORT_DIR: this.paths.supportDir,
+      LOCAL_LLM_HUB_ENV: this.runtimeEnvironment,
+    };
 
-    return spawn(process.execPath, [gatewayEntry], {
+    if (launch.useElectronRunAsNode) {
+      childEnv.ELECTRON_RUN_AS_NODE = "1";
+    } else {
+      delete childEnv.ELECTRON_RUN_AS_NODE;
+    }
+
+    return spawn(launch.command, [gatewayEntry], {
       cwd: this.paths.workspaceRoot,
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        LOCAL_LLM_HUB_APP_SUPPORT_DIR: this.paths.supportDir,
-        LOCAL_LLM_HUB_ENV: this.runtimeEnvironment,
-      },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
   }

@@ -76,6 +76,7 @@ await waitOn({
 });
 
 const electron = start("pnpm", ["exec", "electron", "."], desktopDir, {
+  LOCAL_LLM_HUB_GATEWAY_NODE_EXECUTABLE: process.execPath,
   VITE_DEV_SERVER_URL: "http://127.0.0.1:5173",
 });
 

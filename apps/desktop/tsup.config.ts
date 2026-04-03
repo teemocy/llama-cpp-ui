@@ -6,6 +6,8 @@ export default defineConfig({
     preload: "src/main/preload.ts",
   },
   clean: true,
+  external: ["electron"],
+  noExternal: [/^@localhub\//],
   format: ["cjs"],
   outDir: "dist-electron",
   target: "es2022",

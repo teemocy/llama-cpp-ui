@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildControlHeaders,
+  resolveGatewayLaunchCommand,
   resolveControlBearerToken,
   waitForChildExit,
 } from "./gateway-manager";
@@ -46,6 +47,36 @@ describe("gateway manager auth helpers", () => {
     });
 
     expect(buildControlHeaders(undefined)).toEqual({});
+  });
+
+  it("prefers an explicit node executable for development launches", () => {
+    expect(
+      resolveGatewayLaunchCommand(
+        "development",
+        {
+          LOCAL_LLM_HUB_GATEWAY_NODE_EXECUTABLE: "/opt/homebrew/bin/node",
+        },
+        "/Applications/Electron.app/Contents/MacOS/Electron",
+      ),
+    ).toEqual({
+      command: "/opt/homebrew/bin/node",
+      useElectronRunAsNode: false,
+    });
+  });
+
+  it("keeps using the current executable outside development when no override applies", () => {
+    expect(
+      resolveGatewayLaunchCommand(
+        "packaged",
+        {
+          LOCAL_LLM_HUB_GATEWAY_NODE_EXECUTABLE: "/opt/homebrew/bin/node",
+        },
+        "/Applications/Electron.app/Contents/MacOS/Electron",
+      ),
+    ).toEqual({
+      command: "/Applications/Electron.app/Contents/MacOS/Electron",
+      useElectronRunAsNode: true,
+    });
   });
 
   it("waits for a child process to exit within the graceful timeout", async () => {
