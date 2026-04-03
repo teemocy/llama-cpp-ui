@@ -8,6 +8,7 @@ export const preloadBridgeContract = {
     "gateway:preload-model",
     "gateway:evict-model",
     "gateway:shutdown",
+    "gateway:get-catalog-model",
   ] as const,
 };
 

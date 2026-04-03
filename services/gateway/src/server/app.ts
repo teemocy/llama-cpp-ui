@@ -429,12 +429,35 @@ async function registerControlApp(
     return runtime.listRecentApiLogs(Number.isFinite(limit) && limit > 0 ? limit : 30);
   });
 
-  app.get("/control/downloads", async (request) => {
-    const rawQuery = (request.query as { q?: unknown }).q;
+  app.get("/control/downloads", async (request, reply) => {
+    const queryParams = request.query as {
+      q?: unknown;
+      provider?: unknown;
+      providerModelId?: unknown;
+    };
+    const rawQuery = queryParams.q;
     const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+    const provider = typeof queryParams.provider === "string" ? queryParams.provider.trim() : "";
+    const providerModelId =
+      typeof queryParams.providerModelId === "string" ? queryParams.providerModelId.trim() : "";
 
     if (query.length > 0) {
       return runtime.searchCatalog(query);
+    }
+
+    if (provider.length > 0 || providerModelId.length > 0) {
+      if (
+        (provider !== "huggingface" && provider !== "modelscope") ||
+        providerModelId.length === 0
+      ) {
+        return reply.code(400).send({
+          error: "validation_error",
+          message: "provider and providerModelId are required for catalog details.",
+          requestId: request.id,
+        });
+      }
+
+      return runtime.getCatalogModel(provider, providerModelId);
     }
 
     return runtime.listDownloads();

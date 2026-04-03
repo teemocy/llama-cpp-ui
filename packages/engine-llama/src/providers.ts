@@ -292,6 +292,35 @@ function normalizeModelScopeItem(
   return summary;
 }
 
+function summarizeHuggingFaceSearchItem(baseUrl: string, item: JsonResponse): ProviderModelSummary {
+  const detail = normalizeHuggingFaceItem(baseUrl, item);
+  const formats = Array.from(new Set(detail.formats));
+  const hasGgufHint =
+    detail.providerModelId.toLowerCase().includes("gguf") ||
+    detail.title.toLowerCase().includes("gguf") ||
+    detail.tags.some((tag) => tag.toLowerCase() === "gguf");
+
+  return {
+    ...detail,
+    artifacts: [],
+    formats: formats.length > 0 ? formats : hasGgufHint ? ["gguf"] : [],
+  };
+}
+
+function summarizeModelScopeSearchItem(baseUrl: string, item: JsonResponse): ProviderModelSummary {
+  const detail = normalizeModelScopeItem(baseUrl, item);
+  const hasGgufHint =
+    detail.providerModelId.toLowerCase().includes("gguf") ||
+    detail.title.toLowerCase().includes("gguf") ||
+    detail.tags.some((tag) => tag.toLowerCase() === "gguf");
+
+  return {
+    ...detail,
+    artifacts: [],
+    formats: hasGgufHint ? ["gguf"] : [],
+  };
+}
+
 export class HuggingFaceProvider implements ModelProvider {
   readonly id = "huggingface" as const;
   readonly #fetch: typeof fetch;
@@ -311,41 +340,27 @@ export class HuggingFaceProvider implements ModelProvider {
     const startedAt = Date.now();
     const payload = await readJson(this.#fetch, url.toString());
     const items = Array.isArray(payload)
-      ? await Promise.all(
-          payload.map(async (item) => {
-            const providerModelId = toOptionalString(item.id);
-            if (!providerModelId) {
-              return normalizeHuggingFaceItem(this.#baseUrl, item);
-            }
-
-            try {
-              const detailUrl = new URL(
-                `${this.#baseUrl}/api/models/${encodeProviderModelId(providerModelId)}`,
-              );
-              detailUrl.searchParams.set("blobs", "true");
-              const detail = (await readJson(this.#fetch, detailUrl.toString())) as JsonResponse;
-              return normalizeHuggingFaceItem(this.#baseUrl, detail);
-            } catch {
-              return normalizeHuggingFaceItem(this.#baseUrl, item);
-            }
-          }),
-        )
+      ? payload.map((item) => summarizeHuggingFaceSearchItem(this.#baseUrl, item))
       : [];
 
     return {
-      items: items.filter((item) => item.artifacts.length > 0),
+      items: items.filter((item) => item.formats.includes("gguf")),
       warnings: [],
       sourceLatencyMs: Date.now() - startedAt,
     };
   }
 
-  async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
+  async getModel(providerModelId: string): Promise<ProviderModelSummary> {
     const detailUrl = new URL(
-      `${this.#baseUrl}/api/models/${encodeProviderModelId(request.providerModelId)}`,
+      `${this.#baseUrl}/api/models/${encodeProviderModelId(providerModelId)}`,
     );
     detailUrl.searchParams.set("blobs", "true");
     const detail = (await readJson(this.#fetch, detailUrl.toString())) as JsonResponse;
-    const model = normalizeHuggingFaceItem(this.#baseUrl, detail);
+    return normalizeHuggingFaceItem(this.#baseUrl, detail);
+  }
+
+  async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
+    const model = await this.getModel(request.providerModelId);
     const artifact = model.artifacts.find((item) => item.artifactId === request.artifactId);
     if (!artifact || !artifact.downloadUrl) {
       throw new Error(
@@ -380,10 +395,7 @@ export class ModelScopeProvider implements ModelProvider {
     this.#baseUrl = normalizeBaseUrl(options.modelScopeBaseUrl ?? DEFAULT_MODELSCOPE_BASE_URL);
   }
 
-  async search(query: ProviderSearchQuery): Promise<ProviderSearchResult> {
-    const pageSize = Math.min(Math.max(query.limit * 3, query.limit), 60);
-
-    const startedAt = Date.now();
+  async #searchModels(target: string, pageSize: number): Promise<JsonResponse[]> {
     const payload = (await readJson(this.#fetch, `${this.#baseUrl}/api/v1/models`, {
       method: "PUT",
       headers: {
@@ -392,7 +404,7 @@ export class ModelScopeProvider implements ModelProvider {
       body: JSON.stringify({
         PageSize: pageSize,
         PageNumber: 1,
-        Target: query.text,
+        Target: target,
         Sort: {
           SortBy: "Default",
         },
@@ -401,45 +413,16 @@ export class ModelScopeProvider implements ModelProvider {
     })) as JsonResponse;
     const data =
       payload.Data && typeof payload.Data === "object" ? (payload.Data as JsonResponse) : {};
-    const models = Array.isArray(data.Models) ? data.Models : [];
-    const items = await Promise.all(
-      models.map(async (item) => {
-        const candidate = item as JsonResponse;
-        const providerModelId = toModelScopeProviderModelId(candidate);
-
-        try {
-          const filesUrl = new URL(
-            `${this.#baseUrl}/api/v1/models/${encodeProviderModelId(providerModelId)}/repo/files`,
-          );
-          filesUrl.searchParams.set("Recursive", "True");
-          const filesPayload = (await readJson(this.#fetch, filesUrl.toString())) as JsonResponse;
-          const filesData =
-            filesPayload.Data && typeof filesPayload.Data === "object"
-              ? (filesPayload.Data as JsonResponse)
-              : {};
-          const files = Array.isArray(filesData.Files)
-            ? filesData.Files.map((entry) =>
-                entry && typeof entry === "object" ? (entry as JsonResponse) : undefined,
-              ).filter((entry): entry is JsonResponse => Boolean(entry))
-            : [];
-
-          return normalizeModelScopeItem(this.#baseUrl, candidate, files);
-        } catch {
-          return normalizeModelScopeItem(this.#baseUrl, candidate);
-        }
-      }),
-    );
-
-    return {
-      items: items.filter((item) => item.artifacts.length > 0).slice(0, query.limit),
-      warnings: [],
-      sourceLatencyMs: Date.now() - startedAt,
-    };
+    return Array.isArray(data.Models)
+      ? data.Models.map((entry) =>
+          entry && typeof entry === "object" ? (entry as JsonResponse) : undefined,
+        ).filter((entry): entry is JsonResponse => Boolean(entry))
+      : [];
   }
 
-  async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
+  async #getRepoFiles(providerModelId: string): Promise<JsonResponse[]> {
     const filesUrl = new URL(
-      `${this.#baseUrl}/api/v1/models/${encodeProviderModelId(request.providerModelId)}/repo/files`,
+      `${this.#baseUrl}/api/v1/models/${encodeProviderModelId(providerModelId)}/repo/files`,
     );
     filesUrl.searchParams.set("Recursive", "True");
     const filesPayload = (await readJson(this.#fetch, filesUrl.toString())) as JsonResponse;
@@ -447,16 +430,47 @@ export class ModelScopeProvider implements ModelProvider {
       filesPayload.Data && typeof filesPayload.Data === "object"
         ? (filesPayload.Data as JsonResponse)
         : {};
-    const files = Array.isArray(filesData.Files)
+    return Array.isArray(filesData.Files)
       ? filesData.Files.map((entry) =>
           entry && typeof entry === "object" ? (entry as JsonResponse) : undefined,
         ).filter((entry): entry is JsonResponse => Boolean(entry))
       : [];
-    const artifact = normalizeModelScopeArtifacts(
-      this.#baseUrl,
-      request.providerModelId,
-      files,
-    ).find((item) => item.artifactId === request.artifactId);
+  }
+
+  async search(query: ProviderSearchQuery): Promise<ProviderSearchResult> {
+    const pageSize = Math.min(Math.max(query.limit * 3, query.limit), 60);
+
+    const startedAt = Date.now();
+    const models = await this.#searchModels(query.text, pageSize);
+    const items = models.map((item) => summarizeModelScopeSearchItem(this.#baseUrl, item));
+
+    return {
+      items: items.filter((item) => item.formats.includes("gguf")).slice(0, query.limit),
+      warnings: [],
+      sourceLatencyMs: Date.now() - startedAt,
+    };
+  }
+
+  async getModel(providerModelId: string): Promise<ProviderModelSummary> {
+    const candidates = await this.#searchModels(providerModelId, 10);
+    const candidate =
+      candidates.find((item) => toModelScopeProviderModelId(item) === providerModelId) ??
+      (() => {
+        const segments = providerModelId.split("/");
+        const name = segments.pop() ?? providerModelId;
+        const path = segments.join("/");
+        return {
+          ...(path ? { Path: path } : {}),
+          Name: name,
+        } satisfies JsonResponse;
+      })();
+    const files = await this.#getRepoFiles(providerModelId);
+    return normalizeModelScopeItem(this.#baseUrl, candidate, files);
+  }
+
+  async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
+    const model = await this.getModel(request.providerModelId);
+    const artifact = model.artifacts.find((item) => item.artifactId === request.artifactId);
     if (!artifact || !artifact.downloadUrl) {
       throw new Error(
         `Unable to resolve ModelScope artifact ${request.providerModelId}:${request.artifactId}.`,
@@ -498,6 +512,10 @@ export class ProviderSearchService {
     }
 
     return provider;
+  }
+
+  async getModel(providerId: ProviderId, providerModelId: string): Promise<ProviderModelSummary> {
+    return await this.getProvider(providerId).getModel(providerModelId);
   }
 
   async search(

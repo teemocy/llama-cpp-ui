@@ -109,10 +109,13 @@ async function waitFor(predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 
 class FakeProvider implements ModelProvider {
   readonly id = "huggingface" as const;
-  readonly #plan: ProviderDownloadPlan;
+  readonly #plans: Map<string, ProviderDownloadPlan>;
+  readonly #fallbackPlan: ProviderDownloadPlan;
 
-  constructor(plan: ProviderDownloadPlan) {
-    this.#plan = plan;
+  constructor(plan: ProviderDownloadPlan | ProviderDownloadPlan[]) {
+    const plans = Array.isArray(plan) ? plan : [plan];
+    this.#plans = new Map(plans.map((entry) => [entry.artifactId, entry]));
+    this.#fallbackPlan = plans[0]!;
   }
 
   async search(_query: ProviderSearchQuery): Promise<ProviderSearchResult> {
@@ -125,24 +128,34 @@ class FakeProvider implements ModelProvider {
           repositoryUrl: "https://example.invalid/acme/stage3-tiny-chat",
           tags: ["gguf"],
           formats: ["gguf"],
-          artifacts: [
-            {
-              artifactId: this.#plan.artifactId,
-              fileName: this.#plan.fileName,
-              format: "gguf",
-              sizeBytes: this.#plan.estimatedSizeBytes,
-              checksum: this.#plan.checksum,
-              downloadUrl: this.#plan.url,
-            },
-          ],
+          artifacts: [],
         },
       ],
       warnings: [],
     };
   }
 
-  async resolveDownload(_request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
-    return this.#plan;
+  async getModel(_providerModelId: string) {
+    return {
+      provider: this.id,
+      providerModelId: "acme/stage3-tiny-chat",
+      title: "Stage3 Tiny Chat",
+      repositoryUrl: "https://example.invalid/acme/stage3-tiny-chat",
+      tags: ["gguf"],
+      formats: ["gguf"],
+      artifacts: Array.from(this.#plans.values()).map((plan) => ({
+        artifactId: plan.artifactId,
+        fileName: plan.fileName,
+        format: "gguf" as const,
+        sizeBytes: plan.estimatedSizeBytes,
+        checksum: plan.checksum,
+        downloadUrl: plan.url,
+      })),
+    };
+  }
+
+  async resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan> {
+    return this.#plans.get(request.artifactId) ?? this.#fallbackPlan;
   }
 }
 
@@ -208,7 +221,7 @@ afterEach(async () => {
 });
 
 describe("llama.cpp stage 3 provider search and downloads", () => {
-  it("normalizes HuggingFace and ModelScope search results into one provider catalog", async () => {
+  it("searches providers by repository first, then loads repo manifests on demand", async () => {
     const observedModelScopeBodies: string[] = [];
     const mockFetch: typeof fetch = async (input, init) => {
       const url = String(input);
@@ -308,15 +321,42 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
 
     expect(result.items).toHaveLength(2);
     expect(result.items.map((item) => item.provider)).toEqual(["modelscope", "huggingface"]);
-    expect(result.items[0]?.artifacts[0]?.fileName).toBe("tiny-embed-q8.gguf");
-    expect(result.items[0]?.artifacts[0]?.sizeBytes).toBe(256);
-    expect(result.items[1]?.artifacts[0]?.downloadUrl).toContain("tiny-chat-q4.gguf");
-    expect(result.items[1]?.artifacts[0]?.sizeBytes).toBe(128);
+    expect(result.items.every((item) => item.artifacts.length === 0)).toBe(true);
+    expect(result.items[0]?.formats).toEqual(["gguf"]);
+    expect(result.items[1]?.formats).toEqual(["gguf"]);
     expect(observedModelScopeBodies).toEqual([
       JSON.stringify({
         PageSize: 30,
         PageNumber: 1,
         Target: "tiny",
+        Sort: {
+          SortBy: "Default",
+        },
+        Criterion: [],
+      }),
+    ]);
+
+    const modelscopeDetail = await service.getModel("modelscope", "ms/Tiny-Embed-GGUF");
+    const huggingFaceDetail = await service.getModel("huggingface", "acme/Tiny-Chat-GGUF");
+
+    expect(modelscopeDetail.artifacts[0]?.fileName).toBe("tiny-embed-q8.gguf");
+    expect(modelscopeDetail.artifacts[0]?.sizeBytes).toBe(256);
+    expect(huggingFaceDetail.artifacts[0]?.downloadUrl).toContain("tiny-chat-q4.gguf");
+    expect(huggingFaceDetail.artifacts[0]?.sizeBytes).toBe(128);
+    expect(observedModelScopeBodies).toEqual([
+      JSON.stringify({
+        PageSize: 30,
+        PageNumber: 1,
+        Target: "tiny",
+        Sort: {
+          SortBy: "Default",
+        },
+        Criterion: [],
+      }),
+      JSON.stringify({
+        PageSize: 10,
+        PageNumber: 1,
+        Target: "ms/Tiny-Embed-GGUF",
         Sort: {
           SortBy: "Default",
         },
@@ -481,5 +521,121 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     expect(completed.status).toBe("error");
     expect(completed.errorMessage).toContain("checksum");
     expect(modelsRepository.list()).toHaveLength(0);
+  }, 15_000);
+
+  it("downloads every shard in a bundle and registers only the primary shard once complete", async () => {
+    const supportRoot = await createSupportRoot();
+    const primaryPayload = createSampleGgufBuffer("Bundle Tiny Chat");
+    const secondaryPayload = Buffer.from("secondary shard payload", "utf8");
+    const primaryChecksumSha256 = createSha256(primaryPayload);
+    const secondaryChecksumSha256 = createSha256(secondaryPayload);
+    const server = createServer((request, response) => {
+      if (request.url === "/bundle-00001.gguf") {
+        handleArtifactRequest(request, response, primaryPayload);
+        return;
+      }
+
+      if (request.url === "/bundle-00002.gguf") {
+        handleArtifactRequest(request, response, secondaryPayload);
+        return;
+      }
+
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => server.close());
+    const port = (server.address() as { port: number }).port;
+
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const modelsRepository = new ModelsRepository(database.database);
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository,
+      engineVersionsRepository: new EngineVersionsRepository(database.database),
+    });
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelManager: manager,
+      providerSearch: new ProviderSearchService([
+        new FakeProvider([
+          {
+            provider: "huggingface",
+            artifactId: "bundle-chat-bf16-00001",
+            url: `http://127.0.0.1:${port}/bundle-00001.gguf`,
+            headers: {},
+            fileName: "BF16/bundle-chat-BF16-00001-of-00002.gguf",
+            checksum: {
+              algorithm: "sha256",
+              value: primaryChecksumSha256,
+              source: "provider",
+              status: "verified",
+            },
+            supportsRange: true,
+            estimatedSizeBytes: primaryPayload.length,
+          },
+          {
+            provider: "huggingface",
+            artifactId: "bundle-chat-bf16-00002",
+            url: `http://127.0.0.1:${port}/bundle-00002.gguf`,
+            headers: {},
+            fileName: "BF16/bundle-chat-BF16-00002-of-00002.gguf",
+            checksum: {
+              algorithm: "sha256",
+              value: secondaryChecksumSha256,
+              source: "provider",
+              status: "verified",
+            },
+            supportsRange: true,
+            estimatedSizeBytes: secondaryPayload.length,
+          },
+        ]),
+      ]),
+      chunkBytes: 128,
+    });
+
+    const bundleId = "stage3-bundle-chat-bf16";
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/stage3-bundle-chat",
+      artifactId: "bundle-chat-bf16-00001",
+      displayName: "Bundle Tiny Chat",
+      autoRegister: true,
+      bundleId,
+      bundlePrimaryArtifactId: "bundle-chat-bf16-00001",
+    });
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/stage3-bundle-chat",
+      artifactId: "bundle-chat-bf16-00002",
+      displayName: "Bundle Tiny Chat",
+      autoRegister: false,
+      bundleId,
+      bundlePrimaryArtifactId: "bundle-chat-bf16-00001",
+    });
+
+    await waitFor(() => downloads.listDownloads().every((task) => task.status === "completed"));
+
+    const storedModel = modelsRepository.list();
+    expect(storedModel).toHaveLength(1);
+    expect(storedModel[0]?.artifact.localPath).toBe(
+      path.join(
+        supportRoot,
+        "models",
+        "acme-stage3-bundle-chat",
+        "BF16",
+        "bundle-chat-BF16-00001-of-00002.gguf",
+      ),
+    );
+
+    const completedTasks = downloads.listDownloads();
+    expect(completedTasks.filter((task) => task.modelId)).toHaveLength(1);
+    expect(completedTasks.some((task) => task.fileName.endsWith("00002-of-00002.gguf"))).toBe(true);
   }, 15_000);
 });

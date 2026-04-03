@@ -86,6 +86,7 @@ export const desktopModelRecordSchema = z.object({
   contextLength: positiveIntegerSchema.optional(),
   parameterCount: z.number().int().nonnegative().optional(),
   tokenizer: nonEmptyStringSchema.optional(),
+  gpuLayers: positiveIntegerSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   engineVersion: nonEmptyStringSchema.optional(),
   engineChannel: desktopEngineChannelSchema.optional(),
@@ -107,6 +108,18 @@ export const desktopLocalModelImportRequestSchema = z.object({
 
 export const desktopLocalModelImportResponseSchema = z.object({
   created: z.boolean(),
+  model: desktopModelRecordSchema,
+});
+
+export const desktopModelConfigUpdateRequestSchema = z.object({
+  displayName: nonEmptyStringSchema.max(120).optional(),
+  pinned: z.boolean().optional(),
+  defaultTtlMs: positiveIntegerSchema.optional(),
+  contextLength: positiveIntegerSchema.optional(),
+  gpuLayers: positiveIntegerSchema.optional(),
+});
+
+export const desktopModelConfigUpdateResponseSchema = z.object({
   model: desktopModelRecordSchema,
 });
 
@@ -169,7 +182,6 @@ export const desktopProviderSearchItemSchema = z.object({
   id: nonEmptyStringSchema,
   provider: z.enum(["huggingface", "modelscope"]),
   providerModelId: nonEmptyStringSchema,
-  artifactId: nonEmptyStringSchema,
   title: nonEmptyStringSchema,
   author: nonEmptyStringSchema.optional(),
   summary: z.string().optional(),
@@ -179,8 +191,13 @@ export const desktopProviderSearchItemSchema = z.object({
   downloads: z.number().int().nonnegative().optional(),
   likes: z.number().int().nonnegative().optional(),
   updatedAt: isoDatetimeSchema.optional(),
+  repositoryUrl: z.string().url(),
+});
+
+export const desktopProviderCatalogFileSchema = z.object({
+  id: nonEmptyStringSchema,
+  artifactId: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
-  downloadUrl: z.string().url(),
   sizeBytes: z.number().int().nonnegative().optional(),
   quantization: nonEmptyStringSchema.optional(),
   architecture: nonEmptyStringSchema.optional(),
@@ -188,9 +205,27 @@ export const desktopProviderSearchItemSchema = z.object({
   metadata: jsonRecordSchema.default({}),
 });
 
+export const desktopProviderCatalogVariantSchema = z.object({
+  id: nonEmptyStringSchema,
+  label: nonEmptyStringSchema,
+  primaryArtifactId: nonEmptyStringSchema,
+  files: z.array(desktopProviderCatalogFileSchema),
+  totalSizeBytes: z.number().int().nonnegative().optional(),
+});
+
+export const desktopProviderCatalogDetailSchema = desktopProviderSearchItemSchema.extend({
+  variants: z.array(desktopProviderCatalogVariantSchema),
+});
+
 export const desktopProviderSearchResultSchema = z.object({
   object: z.literal("list"),
   data: z.array(desktopProviderSearchItemSchema),
+  warnings: z.array(z.string()).default([]),
+});
+
+export const desktopProviderCatalogDetailResponseSchema = z.object({
+  object: z.literal("model"),
+  data: desktopProviderCatalogDetailSchema,
   warnings: z.array(z.string()).default([]),
 });
 
@@ -221,7 +256,7 @@ export const desktopDownloadCreateRequestSchema = z.object({
   artifactId: nonEmptyStringSchema,
   title: nonEmptyStringSchema,
   artifactName: nonEmptyStringSchema,
-  downloadUrl: z.string().url(),
+  downloadUrl: z.string().url().optional(),
   destinationPath: fileSystemPathSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
@@ -269,6 +304,10 @@ export type DesktopModelRecord = z.infer<typeof desktopModelRecordSchema>;
 export type DesktopModelLibrary = z.infer<typeof desktopModelLibrarySchema>;
 export type DesktopLocalModelImportRequest = z.infer<typeof desktopLocalModelImportRequestSchema>;
 export type DesktopLocalModelImportResponse = z.infer<typeof desktopLocalModelImportResponseSchema>;
+export type DesktopModelConfigUpdateRequest = z.infer<typeof desktopModelConfigUpdateRequestSchema>;
+export type DesktopModelConfigUpdateResponse = z.infer<
+  typeof desktopModelConfigUpdateResponseSchema
+>;
 export type DesktopChatSessionList = z.infer<typeof desktopChatSessionListSchema>;
 export type DesktopChatMessageList = z.infer<typeof desktopChatMessageListSchema>;
 export type DesktopChatSessionUpsertRequest = z.infer<typeof desktopChatSessionUpsertRequestSchema>;
@@ -277,6 +316,12 @@ export type DesktopChatRunResponse = z.infer<typeof desktopChatRunResponseSchema
 export type DesktopApiLogList = z.infer<typeof desktopApiLogListSchema>;
 export type DesktopProviderSearchItem = z.infer<typeof desktopProviderSearchItemSchema>;
 export type DesktopProviderSearchResult = z.infer<typeof desktopProviderSearchResultSchema>;
+export type DesktopProviderCatalogFile = z.infer<typeof desktopProviderCatalogFileSchema>;
+export type DesktopProviderCatalogVariant = z.infer<typeof desktopProviderCatalogVariantSchema>;
+export type DesktopProviderCatalogDetail = z.infer<typeof desktopProviderCatalogDetailSchema>;
+export type DesktopProviderCatalogDetailResponse = z.infer<
+  typeof desktopProviderCatalogDetailResponseSchema
+>;
 export type DesktopDownloadTask = z.infer<typeof desktopDownloadTaskSchema>;
 export type DesktopDownloadList = z.infer<typeof desktopDownloadListSchema>;
 export type DesktopDownloadCreateRequest = z.infer<typeof desktopDownloadCreateRequestSchema>;

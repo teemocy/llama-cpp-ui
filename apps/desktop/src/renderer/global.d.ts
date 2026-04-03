@@ -13,6 +13,7 @@ import type {
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelLibrary,
+  DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
   DesktopShellState,
   GatewayEvent,
@@ -52,6 +53,10 @@ type DesktopApi = {
     runChat(payload: DesktopChatRunRequest): Promise<DesktopChatRunResponse>;
     listApiLogs(limit?: number): Promise<DesktopApiLogList>;
     searchCatalog(query: string): Promise<DesktopProviderSearchResult>;
+    getCatalogModel(
+      provider: "huggingface" | "modelscope",
+      providerModelId: string,
+    ): Promise<DesktopProviderCatalogDetailResponse>;
     listDownloads(): Promise<DesktopDownloadList>;
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;

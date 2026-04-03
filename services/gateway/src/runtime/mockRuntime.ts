@@ -19,6 +19,7 @@ import {
   type DesktopLocalModelImportResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
+  type DesktopProviderCatalogDetailResponse,
   type DesktopProviderSearchResult,
   type EmbeddingsRequest,
   type EmbeddingsResponse,
@@ -413,10 +414,9 @@ export class MockGatewayRuntime {
   searchCatalog(query: string): DesktopProviderSearchResult {
     const normalized = query.trim().toLowerCase();
     const item = {
-      id: "https://example.invalid/mock/qwen2.5-7b-instruct-q4_k_m.gguf",
+      id: "huggingface:mock/qwen2.5-7b-instruct",
       provider: "huggingface" as const,
       providerModelId: "mock/qwen2.5-7b-instruct",
-      artifactId: "qwen2.5-7b-instruct-q4_k_m",
       title: "Mock Qwen2.5 7B Instruct",
       author: "mock",
       summary: "Fixture provider result from the mock gateway runtime.",
@@ -426,18 +426,57 @@ export class MockGatewayRuntime {
       downloads: 1200,
       likes: 88,
       updatedAt: new Date().toISOString(),
-      artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
-      downloadUrl: "https://example.invalid/qwen2.5-7b-instruct-q4_k_m.gguf",
-      sizeBytes: 4_000_000_000,
-      quantization: "Q4_K_M",
-      architecture: "llama",
-      checksumSha256: "a".repeat(64),
-      metadata: {},
+      repositoryUrl: "https://example.invalid/mock/qwen2.5-7b-instruct",
     };
 
     return {
       object: "list",
       data: normalized.length === 0 || item.title.toLowerCase().includes(normalized) ? [item] : [],
+      warnings: [],
+    };
+  }
+
+  getCatalogModel(
+    provider: "huggingface" | "modelscope",
+    providerModelId: string,
+  ): DesktopProviderCatalogDetailResponse {
+    return {
+      object: "model",
+      data: {
+        id: `${provider}:${providerModelId}`,
+        provider,
+        providerModelId,
+        title: "Mock Qwen2.5 7B Instruct",
+        author: "mock",
+        summary: "Fixture provider result from the mock gateway runtime.",
+        description: "Fixture provider result from the mock gateway runtime.",
+        tags: ["gguf", "chat", "instruct"],
+        formats: ["gguf"],
+        downloads: 1200,
+        likes: 88,
+        updatedAt: new Date().toISOString(),
+        repositoryUrl: "https://example.invalid/mock/qwen2.5-7b-instruct",
+        variants: [
+          {
+            id: `${provider}:${providerModelId}:q4_k_m`,
+            label: "Q4_K_M",
+            primaryArtifactId: "qwen2.5-7b-instruct-q4_k_m",
+            files: [
+              {
+                id: "qwen2.5-7b-instruct-q4_k_m",
+                artifactId: "qwen2.5-7b-instruct-q4_k_m",
+                artifactName: "qwen2.5-7b-instruct-q4_k_m.gguf",
+                sizeBytes: 4_000_000_000,
+                quantization: "Q4_K_M",
+                architecture: "llama",
+                checksumSha256: "a".repeat(64),
+                metadata: {},
+              },
+            ],
+            totalSizeBytes: 4_000_000_000,
+          },
+        ],
+      },
       warnings: [],
     };
   }

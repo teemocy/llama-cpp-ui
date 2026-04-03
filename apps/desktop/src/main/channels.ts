@@ -14,6 +14,7 @@ export const IPC_CHANNELS = {
   gatewayRunChat: "gateway:run-chat",
   gatewayListApiLogs: "gateway:list-api-logs",
   gatewaySearchCatalog: "gateway:search-catalog",
+  gatewayGetCatalogModel: "gateway:get-catalog-model",
   gatewayListDownloads: "gateway:list-downloads",
   gatewayCreateDownload: "gateway:create-download",
   gatewayPauseDownload: "gateway:pause-download",

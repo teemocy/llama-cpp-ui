@@ -133,6 +133,10 @@ export interface GatewayRuntime {
   runChat(input: DesktopChatRunRequest, traceId?: string): MaybePromise<DesktopChatRunResponse>;
   listRecentApiLogs(limit?: number): MaybePromise<DesktopApiLogList>;
   searchCatalog(query: string): MaybePromise<DesktopProviderSearchResult>;
+  getCatalogModel(
+    provider: "huggingface" | "modelscope",
+    providerModelId: string,
+  ): MaybePromise<DesktopProviderCatalogDetailResponse>;
   createDownload(
     input: DesktopDownloadCreateRequest,
     traceId?: string,

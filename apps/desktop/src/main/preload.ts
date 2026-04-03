@@ -12,6 +12,7 @@ import type {
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
   DesktopModelLibrary,
+  DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
   DesktopShellState,
   GatewayEvent,
@@ -74,7 +75,16 @@ const api = {
     listApiLogs: (limit?: number) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListApiLogs, limit) as Promise<DesktopApiLogList>,
     searchCatalog: (query: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewaySearchCatalog, query) as Promise<DesktopProviderSearchResult>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewaySearchCatalog,
+        query,
+      ) as Promise<DesktopProviderSearchResult>,
+    getCatalogModel: (provider: "huggingface" | "modelscope", providerModelId: string) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayGetCatalogModel,
+        provider,
+        providerModelId,
+      ) as Promise<DesktopProviderCatalogDetailResponse>,
     listDownloads: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListDownloads) as Promise<DesktopDownloadList>,
     createDownload: (payload: DesktopDownloadCreateRequest) =>

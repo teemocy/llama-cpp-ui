@@ -193,6 +193,11 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewaySearchCatalog, (_event, query: string) =>
     gatewayManager.searchCatalog(query),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.gatewayGetCatalogModel,
+    (_event, provider: "huggingface" | "modelscope", providerModelId: string) =>
+      gatewayManager.getCatalogModel(provider, providerModelId),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayListDownloads, () => gatewayManager.listDownloads());
   ipcMain.handle(IPC_CHANNELS.gatewayCreateDownload, (_event, payload) =>
     gatewayManager.createDownload(payload),

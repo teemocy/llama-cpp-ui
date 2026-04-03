@@ -131,25 +131,20 @@ describe("shared contracts", () => {
 
   it("keeps provider search items round-trippable into create-download requests", () => {
     const item = desktopProviderSearchItemSchema.parse({
-      id: "https://example.invalid/search/result/gateway-stage3-chat-q4.gguf",
+      id: "huggingface:acme/stage3-gateway-chat",
       provider: "huggingface",
       providerModelId: "acme/stage3-gateway-chat",
-      artifactId: "gateway-stage3-chat-q4",
       title: "Gateway Stage3 Chat",
-      artifactName: "gateway-stage3-chat-q4.gguf",
-      downloadUrl:
-        "https://example.invalid/acme/stage3-gateway-chat/resolve/main/gateway-stage3-chat-q4.gguf",
-      metadata: {},
+      repositoryUrl: "https://example.invalid/acme/stage3-gateway-chat",
     });
 
     const createRequest = desktopDownloadCreateRequestSchema.parse({
       provider: item.provider,
       providerModelId: item.providerModelId,
-      artifactId: item.artifactId,
+      artifactId: "gateway-stage3-chat-q4",
       title: item.title,
-      artifactName: item.artifactName,
-      downloadUrl: item.downloadUrl,
-      metadata: item.metadata,
+      artifactName: "gateway-stage3-chat-q4.gguf",
+      metadata: {},
     });
 
     expect(createRequest.providerModelId).toBe("acme/stage3-gateway-chat");

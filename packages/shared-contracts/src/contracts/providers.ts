@@ -77,5 +77,6 @@ export interface ProviderDownloadPlan {
 export interface ModelProvider {
   readonly id: ProviderId;
   search(query: ProviderSearchQuery): Promise<ProviderSearchResult>;
+  getModel(providerModelId: string): Promise<ProviderModelSummary>;
   resolveDownload(request: ProviderDownloadRequest): Promise<ProviderDownloadPlan>;
 }

@@ -24,6 +24,7 @@ import {
   type DesktopModelConfigUpdateResponse,
   type DesktopModelLibrary,
   type DesktopModelRecord,
+  type DesktopProviderCatalogDetailResponse,
   type DesktopProviderSearchResult,
   type DesktopShellState,
   type GatewayDiscoveryFile,
@@ -42,6 +43,7 @@ import {
   desktopLocalModelImportResponseSchema,
   desktopModelConfigUpdateResponseSchema,
   desktopModelLibrarySchema,
+  desktopProviderCatalogDetailResponseSchema,
   desktopProviderSearchResultSchema,
   desktopShellStateSchema,
   gatewayEventSchema,
@@ -678,6 +680,26 @@ export class GatewayManager extends EventEmitter {
     );
 
     return desktopProviderSearchResultSchema.parse(payload);
+  }
+
+  async getCatalogModel(
+    provider: "huggingface" | "modelscope",
+    providerModelId: string,
+  ): Promise<DesktopProviderCatalogDetailResponse> {
+    const discovery = this.requireDiscovery();
+    const encodedProvider = encodeURIComponent(provider);
+    const encodedModelId = encodeURIComponent(providerModelId);
+    const payload = await this.readJsonResponse(
+      fetch(
+        `${discovery.controlBaseUrl}/control/downloads?provider=${encodedProvider}&providerModelId=${encodedModelId}`,
+        {
+          headers: this.createControlHeaders(),
+        },
+      ),
+      "Unable to load model catalog details.",
+    );
+
+    return desktopProviderCatalogDetailResponseSchema.parse(payload);
   }
 
   async listDownloads(): Promise<DesktopDownloadList> {

@@ -362,6 +362,35 @@ select {
   gap: 14px;
 }
 
+.search-result-selector {
+  max-width: 360px;
+}
+
+.search-result-selector label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(20, 33, 61, 0.56);
+}
+
+.search-result-selector select {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--ink);
+}
+
+.search-detail-note {
+  margin-top: 12px;
+  color: rgba(20, 33, 61, 0.68);
+}
+
+.search-detail-note-error {
+  color: #b2432c;
+}
+
 .search-result-meta {
   margin-top: 0;
 }

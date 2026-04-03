@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { ProviderSearchService } from "@localhub/engine-llama";
 import { resolveAppPaths } from "@localhub/platform";
+import { embeddingsResponseSchema } from "@localhub/shared-contracts";
 import type {
   ModelProvider,
   ProviderDownloadPlan,
@@ -15,7 +16,10 @@ import type {
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { GatewayConfig } from "../src/config.js";
-import { createRepositoryGatewayRuntime } from "../src/runtime/repositoryRuntime.js";
+import {
+  createRepositoryGatewayRuntime,
+  normalizeEmbeddingsResponsePayload,
+} from "../src/runtime/repositoryRuntime.js";
 import { buildGateway } from "../src/server/app.js";
 
 enum TestGgufValueType {
@@ -99,19 +103,32 @@ class FakeProvider implements ModelProvider {
           repositoryUrl: "https://example.invalid/acme/stage3-gateway-chat",
           tags: ["gguf", "chat"],
           formats: ["gguf"],
-          artifacts: [
-            {
-              artifactId: this.#plan.artifactId,
-              fileName: this.#plan.fileName,
-              format: "gguf",
-              sizeBytes: this.#plan.estimatedSizeBytes,
-              downloadUrl: this.#plan.url,
-              checksum: this.#plan.checksum,
-            },
-          ],
+          artifacts: [],
         },
       ],
       warnings: [],
+    };
+  }
+
+  async getModel(_providerModelId: string) {
+    return {
+      provider: "huggingface" as const,
+      providerModelId: "acme/stage3-gateway-chat",
+      title: "Gateway Stage3 Chat",
+      author: "acme",
+      repositoryUrl: "https://example.invalid/acme/stage3-gateway-chat",
+      tags: ["gguf", "chat"],
+      formats: ["gguf"],
+      artifacts: [
+        {
+          artifactId: this.#plan.artifactId,
+          fileName: this.#plan.fileName,
+          format: "gguf" as const,
+          sizeBytes: this.#plan.estimatedSizeBytes,
+          downloadUrl: this.#plan.url,
+          checksum: this.#plan.checksum,
+        },
+      ],
     };
   }
 
@@ -163,6 +180,31 @@ afterEach(async () => {
 });
 
 describe("gateway stage 3 runtime", () => {
+  it("normalizes embeddings usage before validation", () => {
+    const normalized = normalizeEmbeddingsResponsePayload({
+      object: "list",
+      model: "model_qwen3-embedding-4b",
+      data: [
+        {
+          object: "embedding",
+          index: 0,
+          embedding: [0.1, 0.2, 0.3],
+        },
+      ],
+      usage: {
+        prompt_tokens: 12,
+        total_tokens: 12,
+      },
+    });
+
+    const parsed = embeddingsResponseSchema.parse(normalized);
+    expect(parsed.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 0,
+      total_tokens: 12,
+    });
+  });
+
   it("searches provider catalog and completes a routed download", async () => {
     const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage3-"));
     const payload = createSampleGgufBuffer("Gateway Stage3 Chat");
@@ -260,13 +302,39 @@ describe("gateway stage 3 runtime", () => {
       object: "list",
       data: [
         expect.objectContaining({
-          id: artifactUrl,
+          id: "huggingface:acme/stage3-gateway-chat",
           providerModelId: "acme/stage3-gateway-chat",
-          artifactId: "gateway-stage3-chat-q4",
           title: "Gateway Stage3 Chat",
-          artifactName: "gateway-stage3-chat-q4.gguf",
+          repositoryUrl: "https://example.invalid/acme/stage3-gateway-chat",
         }),
       ],
+    });
+
+    const detailResponse = await gateway.controlApp.inject({
+      method: "GET",
+      url: "/control/downloads?provider=huggingface&providerModelId=acme%2Fstage3-gateway-chat",
+      headers: {
+        authorization: "Bearer control-secret-stage3",
+      },
+    });
+
+    expect(detailResponse.statusCode).toBe(200);
+    expect(detailResponse.json()).toMatchObject({
+      object: "model",
+      data: expect.objectContaining({
+        providerModelId: "acme/stage3-gateway-chat",
+        variants: [
+          expect.objectContaining({
+            primaryArtifactId: "gateway-stage3-chat-q4",
+            files: [
+              expect.objectContaining({
+                artifactId: "gateway-stage3-chat-q4",
+                artifactName: "gateway-stage3-chat-q4.gguf",
+              }),
+            ],
+          }),
+        ],
+      }),
     });
 
     const createResponse = await gateway.controlApp.inject({
@@ -281,7 +349,6 @@ describe("gateway stage 3 runtime", () => {
         artifactId: "gateway-stage3-chat-q4",
         title: "Gateway Stage3 Chat",
         artifactName: "gateway-stage3-chat-q4.gguf",
-        downloadUrl: artifactUrl,
         checksumSha256,
         sizeBytes: payload.length,
       },

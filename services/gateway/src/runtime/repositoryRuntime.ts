@@ -40,6 +40,7 @@ import {
   type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
+  type DesktopProviderCatalogDetailResponse,
   type DesktopProviderSearchResult,
   type EmbeddingsRequest,
   type EmbeddingsResponse,
@@ -61,6 +62,11 @@ import type {
   ModelArtifact,
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
+import type {
+  ProviderArtifactDescriptor,
+  ProviderId,
+  ProviderModelSummary,
+} from "@localhub/shared-contracts/foundation-providers";
 import type {
   ChatMessage,
   ChatSession,
@@ -106,6 +112,218 @@ const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   embeddings: true,
   streaming: true,
 };
+const QUANTIZATION_TOKEN_PATTERN =
+  /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
+const SHARD_SUFFIX_PATTERN = /^(.*?)-(\d{5})-of-(\d{5})$/i;
+const AUXILIARY_GGUF_PATTERN = /^mmproj(?:[-_.]|$)/i;
+
+interface CatalogVariantArtifact {
+  artifact: ProviderArtifactDescriptor;
+  auxiliary: boolean;
+  baseModelName: string;
+  basename: string;
+  quantizationLabel: string;
+  shardIndex?: number;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeQuantLabel(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const token = value.trim().replace(/\.gguf$/i, "");
+  return QUANTIZATION_TOKEN_PATTERN.test(token) ? token.toUpperCase() : undefined;
+}
+
+function extractTrailingQuantization(stem: string): string | undefined {
+  const match =
+    /(?:^|[-_])((?:IQ\d(?:_[A-Z0-9]+)*|Q\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4))$/i.exec(
+      stem,
+    );
+  return normalizeQuantLabel(match?.[1]);
+}
+
+function stripTrailingToken(value: string, token: string | undefined): string {
+  if (!token) {
+    return value;
+  }
+
+  return value.replace(new RegExp(`(?:[-_])${escapeRegExp(token)}$`, "i"), "");
+}
+
+function toCatalogVariantArtifact(artifact: ProviderArtifactDescriptor): CatalogVariantArtifact {
+  const normalizedPath = artifact.fileName.replace(/\\/g, "/");
+  const pathSegments = normalizedPath.split("/").filter((segment) => segment.length > 0);
+  const basename = pathSegments.at(-1) ?? artifact.fileName;
+  const stem = basename.replace(/\.gguf$/i, "");
+  const shardMatch = SHARD_SUFFIX_PATTERN.exec(stem);
+  const shardlessStem = shardMatch?.[1] ?? stem;
+  const directoryHint = pathSegments.length > 1 ? pathSegments[pathSegments.length - 2] : undefined;
+  const quantizationLabel =
+    normalizeQuantLabel(artifact.quantization) ??
+    normalizeQuantLabel(directoryHint) ??
+    extractTrailingQuantization(shardlessStem) ??
+    "Default";
+  const baseModelName = stripTrailingToken(
+    shardlessStem.replace(/(?:[-_])gguf$/i, ""),
+    quantizationLabel === "Default" ? undefined : quantizationLabel,
+  );
+
+  return {
+    artifact,
+    auxiliary: AUXILIARY_GGUF_PATTERN.test(basename),
+    baseModelName: baseModelName || shardlessStem,
+    basename,
+    quantizationLabel,
+    ...(shardMatch?.[2] ? { shardIndex: Number(shardMatch[2]) } : {}),
+  };
+}
+
+function compareCatalogVariantArtifacts(
+  left: CatalogVariantArtifact,
+  right: CatalogVariantArtifact,
+): number {
+  if (left.auxiliary !== right.auxiliary) {
+    return left.auxiliary ? 1 : -1;
+  }
+
+  const leftShardIndex = left.shardIndex ?? 1;
+  const rightShardIndex = right.shardIndex ?? 1;
+  if (leftShardIndex !== rightShardIndex) {
+    return leftShardIndex - rightShardIndex;
+  }
+
+  return left.basename.localeCompare(right.basename);
+}
+
+function toCatalogVariantTotalSize(files: CatalogVariantArtifact[]): number | undefined {
+  if (files.some((file) => file.artifact.sizeBytes === undefined)) {
+    return undefined;
+  }
+
+  return files.reduce((total, file) => total + (file.artifact.sizeBytes ?? 0), 0);
+}
+
+function toDesktopProviderSearchItem(
+  item: ProviderModelSummary,
+): DesktopProviderSearchResult["data"][number] {
+  return {
+    id: `${item.provider}:${item.providerModelId}`,
+    provider: item.provider,
+    providerModelId: item.providerModelId,
+    title: item.title,
+    ...(item.author ? { author: item.author } : {}),
+    ...(item.description ? { summary: item.description } : {}),
+    ...(item.description ? { description: item.description } : {}),
+    tags: item.tags,
+    formats: item.formats,
+    ...(item.downloads !== undefined ? { downloads: item.downloads } : {}),
+    ...(item.likes !== undefined ? { likes: item.likes } : {}),
+    ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+    repositoryUrl: item.repositoryUrl,
+  };
+}
+
+function toDesktopProviderCatalogDetail(
+  item: ProviderModelSummary,
+): DesktopProviderCatalogDetailResponse["data"] {
+  const baseGroups = new Map<
+    string,
+    {
+      baseModelName: string;
+      auxiliaryFiles: CatalogVariantArtifact[];
+      variants: Map<string, CatalogVariantArtifact[]>;
+    }
+  >();
+
+  for (const artifact of item.artifacts) {
+    const file = toCatalogVariantArtifact(artifact);
+    const baseKey = file.baseModelName.toLowerCase();
+    const baseGroup = baseGroups.get(baseKey) ?? {
+      baseModelName: file.baseModelName,
+      auxiliaryFiles: [],
+      variants: new Map<string, CatalogVariantArtifact[]>(),
+    };
+    if (!baseGroups.has(baseKey)) {
+      baseGroups.set(baseKey, baseGroup);
+    }
+
+    if (file.auxiliary) {
+      baseGroup.auxiliaryFiles.push(file);
+      continue;
+    }
+
+    const variantKey = file.quantizationLabel.toLowerCase();
+    const variantFiles = baseGroup.variants.get(variantKey) ?? [];
+    variantFiles.push(file);
+    baseGroup.variants.set(variantKey, variantFiles);
+  }
+
+  const multipleBaseGroups = baseGroups.size > 1;
+  const variants: DesktopProviderCatalogDetailResponse["data"]["variants"] = [];
+
+  for (const baseGroup of baseGroups.values()) {
+    for (const [variantKey, modelFiles] of baseGroup.variants.entries()) {
+      const auxiliaryFiles = baseGroup.auxiliaryFiles.filter((file) => {
+        if (file.quantizationLabel.toLowerCase() === variantKey) {
+          return true;
+        }
+
+        return baseGroup.auxiliaryFiles.length === 1 && baseGroup.variants.size === 1;
+      });
+      const files = [...modelFiles, ...auxiliaryFiles].sort(compareCatalogVariantArtifacts);
+      const primary = files.find((file) => !file.auxiliary) ?? files[0];
+      if (!primary) {
+        continue;
+      }
+
+      const totalSizeBytes = toCatalogVariantTotalSize(files);
+      const label = multipleBaseGroups
+        ? primary.quantizationLabel === "Default"
+          ? baseGroup.baseModelName
+          : `${baseGroup.baseModelName} / ${primary.quantizationLabel}`
+        : primary.quantizationLabel;
+
+      variants.push({
+        id: `${item.provider}:${item.providerModelId}:${baseGroup.baseModelName.toLowerCase()}:${variantKey}`,
+        label,
+        primaryArtifactId: primary.artifact.artifactId,
+        files: files.map((file) => ({
+          id: file.artifact.artifactId,
+          artifactId: file.artifact.artifactId,
+          artifactName: file.artifact.fileName,
+          ...(file.artifact.sizeBytes !== undefined ? { sizeBytes: file.artifact.sizeBytes } : {}),
+          ...(file.artifact.quantization ? { quantization: file.artifact.quantization } : {}),
+          ...(file.artifact.architecture ? { architecture: file.artifact.architecture } : {}),
+          ...(file.artifact.checksum?.algorithm === "sha256"
+            ? { checksumSha256: file.artifact.checksum.value }
+            : {}),
+          metadata: file.artifact.metadata ?? {},
+        })),
+        ...(totalSizeBytes !== undefined ? { totalSizeBytes } : {}),
+      });
+    }
+  }
+
+  variants.sort((left, right) => {
+    const leftSize = left.totalSizeBytes ?? 0;
+    const rightSize = right.totalSizeBytes ?? 0;
+    if (leftSize !== rightSize) {
+      return rightSize - leftSize;
+    }
+
+    return left.label.localeCompare(right.label);
+  });
+
+  return {
+    ...toDesktopProviderSearchItem(item),
+    variants,
+  };
+}
 
 interface RepositoryGatewayRuntimeOptions {
   cwd?: string;
@@ -1051,48 +1269,21 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
     return {
       object: "list",
-      data: result.items.flatMap(
-        (item: Awaited<ReturnType<LlamaCppDownloadManager["search"]>>["items"][number]) =>
-          item.artifacts.flatMap(
-            (
-              artifact: Awaited<
-                ReturnType<LlamaCppDownloadManager["search"]>
-              >["items"][number]["artifacts"][number],
-            ) => {
-              if (!artifact.downloadUrl) {
-                return [];
-              }
-
-              return [
-                {
-                  id: artifact.downloadUrl,
-                  provider: item.provider,
-                  providerModelId: item.providerModelId,
-                  artifactId: artifact.artifactId,
-                  title: item.title,
-                  ...(item.author ? { author: item.author } : {}),
-                  ...(item.description ? { summary: item.description } : {}),
-                  ...(item.description ? { description: item.description } : {}),
-                  tags: item.tags,
-                  formats: item.formats,
-                  ...(item.downloads !== undefined ? { downloads: item.downloads } : {}),
-                  ...(item.likes !== undefined ? { likes: item.likes } : {}),
-                  ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
-                  artifactName: artifact.fileName,
-                  downloadUrl: artifact.downloadUrl,
-                  ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
-                  ...(artifact.quantization ? { quantization: artifact.quantization } : {}),
-                  ...(artifact.architecture ? { architecture: artifact.architecture } : {}),
-                  ...(artifact.checksum?.algorithm === "sha256"
-                    ? { checksumSha256: artifact.checksum.value }
-                    : {}),
-                  metadata: artifact.metadata ?? {},
-                },
-              ];
-            },
-          ),
-      ),
+      data: result.items.map((item) => toDesktopProviderSearchItem(item)),
       warnings: result.warnings,
+    };
+  }
+
+  async getCatalogModel(
+    provider: ProviderId,
+    providerModelId: string,
+  ): Promise<DesktopProviderCatalogDetailResponse> {
+    const item = await this.#downloadManager.getCatalogModel(provider, providerModelId);
+
+    return {
+      object: "model",
+      data: toDesktopProviderCatalogDetail(item),
+      warnings: item.artifacts.length === 0 ? ["No GGUF variants found for this repository."] : [],
     };
   }
 
@@ -1101,11 +1292,25 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): Promise<DesktopDownloadActionResponse> {
     this.assertAcceptingNewWork();
+    const metadata =
+      input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        ? input.metadata
+        : {};
     const task = await this.#downloadManager.startDownload({
       provider: input.provider,
       providerModelId: input.providerModelId,
       artifactId: input.artifactId,
       displayName: input.title,
+      ...(typeof metadata.autoRegister === "boolean"
+        ? { autoRegister: metadata.autoRegister }
+        : {}),
+      ...(typeof metadata.bundleId === "string" && metadata.bundleId.length > 0
+        ? { bundleId: metadata.bundleId }
+        : {}),
+      ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
+      metadata.bundlePrimaryArtifactId.length > 0
+        ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
+        : {}),
     });
 
     return desktopDownloadActionResponseSchema.parse({

@@ -17,6 +17,7 @@ import type { DownloadTask } from "@localhub/shared-contracts/foundation-persist
 import type {
   ProviderDownloadRequest,
   ProviderId,
+  ProviderModelSummary,
   ProviderSearchQuery,
   ProviderSearchResult,
 } from "@localhub/shared-contracts/foundation-providers";
@@ -36,6 +37,9 @@ interface DownloadTaskMetadata {
   displayName?: string;
   remoteUrl?: string;
   supportsRange?: boolean;
+  autoRegister?: boolean;
+  bundleId?: string;
+  bundlePrimaryArtifactId?: string;
 }
 
 export interface Stage3DownloadRecord {
@@ -60,6 +64,9 @@ export interface Stage3DownloadRequest {
   providerModelId: string;
   artifactId: string;
   displayName?: string;
+  autoRegister?: boolean;
+  bundleId?: string;
+  bundlePrimaryArtifactId?: string;
 }
 
 export interface LlamaCppDownloadManagerOptions {
@@ -78,9 +85,35 @@ function sanitizePathPart(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+function toOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function toOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function sanitizeRelativeSegments(fileName: string): string[] {
+  return fileName
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((segment) => sanitizePathPart(segment))
+    .filter((segment) => segment.length > 0);
+}
+
 function ensureDirectory(directory: string): string {
   mkdirSync(directory, { recursive: true });
   return directory;
+}
+
+function buildDestinationPath(
+  supportRoot: string,
+  providerModelId: string,
+  fileName: string,
+): string {
+  const modelDirectory = path.join(supportRoot, "models", sanitizePathPart(providerModelId));
+  const segments = sanitizeRelativeSegments(fileName);
+  return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.gguf"]));
 }
 
 function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
@@ -94,6 +127,10 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
   ) {
     throw new Error(`Download task ${task.id} is missing required metadata.`);
   }
+
+  const autoRegister = toOptionalBoolean(metadata.autoRegister);
+  const bundleId = toOptionalString(metadata.bundleId);
+  const bundlePrimaryArtifactId = toOptionalString(metadata.bundlePrimaryArtifactId);
 
   return {
     providerModelId: metadata.providerModelId,
@@ -117,6 +154,9 @@ function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {
     ...(typeof metadata.supportsRange === "boolean"
       ? { supportsRange: metadata.supportsRange }
       : {}),
+    ...(autoRegister !== undefined ? { autoRegister } : {}),
+    ...(bundleId ? { bundleId } : {}),
+    ...(bundlePrimaryArtifactId ? { bundlePrimaryArtifactId } : {}),
   };
 }
 
@@ -175,6 +215,13 @@ export class LlamaCppDownloadManager {
     return this.#providerSearch.search(query, providerIds);
   }
 
+  async getCatalogModel(
+    provider: ProviderId,
+    providerModelId: string,
+  ): Promise<ProviderModelSummary> {
+    return await this.#providerSearch.getModel(provider, providerModelId);
+  }
+
   listDownloads(): Stage3DownloadRecord[] {
     return this.#downloadsRepository.list().map((task) => this.toRecord(task));
   }
@@ -195,10 +242,10 @@ export class LlamaCppDownloadManager {
     } satisfies ProviderDownloadRequest);
     const fileName = path.basename(plan.fileName);
     const partialPath = path.join(this.#partialsRoot, `${taskId}.part`);
-    const destinationPath = path.join(
+    const destinationPath = buildDestinationPath(
       this.#supportRoot,
-      "models",
-      `${sanitizePathPart(request.providerModelId)}-${sanitizePathPart(fileName)}`,
+      request.providerModelId,
+      plan.fileName,
     );
 
     const task: DownloadTask = {
@@ -219,6 +266,11 @@ export class LlamaCppDownloadManager {
         ...(request.displayName ? { displayName: request.displayName } : {}),
         remoteUrl: plan.url,
         supportsRange: plan.supportsRange,
+        ...(request.autoRegister !== undefined ? { autoRegister: request.autoRegister } : {}),
+        ...(request.bundleId ? { bundleId: request.bundleId } : {}),
+        ...(request.bundlePrimaryArtifactId
+          ? { bundlePrimaryArtifactId: request.bundlePrimaryArtifactId }
+          : {}),
       },
       createdAt: now,
       updatedAt: now,
@@ -411,25 +463,37 @@ export class LlamaCppDownloadManager {
         throw new Error("Downloaded file checksum did not match provider metadata.");
       }
 
-      const registered = await this.#modelManager.registerLocalModel({
-        filePath: metadata.destinationPath,
-        ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
-        ...(task.checksumSha256 ? { expectedChecksumSha256: task.checksumSha256 } : {}),
-        sourceKind: task.provider,
-        remoteUrl: metadata.remoteUrl ?? task.url,
-      });
-
       const completedTask: DownloadTask = {
         ...task,
-        modelId: registered.artifact.id,
-        downloadedBytes: registered.artifact.sizeBytes,
-        totalBytes: registered.artifact.sizeBytes,
+        downloadedBytes: task.totalBytes ?? task.downloadedBytes,
+        totalBytes: task.totalBytes ?? task.downloadedBytes,
         status: "completed",
         checksumSha256,
         updatedAt: this.#now(),
       };
+      if (!metadata.bundleId && metadata.autoRegister !== false) {
+        return await this.registerCompletedTask(completedTask, metadata);
+      }
+
       this.#downloadsRepository.upsert(completedTask);
-      this.publishProgress(completedTask, `Indexed ${registered.profile.displayName}.`);
+
+      if (metadata.bundleId) {
+        const registered = await this.maybeRegisterBundle(metadata.bundleId);
+        const latestTask = this.#downloadsRepository.findById(taskId) ?? completedTask;
+        if (registered && registered.id === latestTask.id) {
+          return registered;
+        }
+
+        this.publishProgress(
+          latestTask,
+          metadata.autoRegister === false
+            ? "Download completed."
+            : "Waiting for remaining bundle files.",
+        );
+        return this.toRecord(latestTask);
+      }
+
+      this.publishProgress(completedTask, "Download completed.");
       return this.toRecord(completedTask);
     } catch (error) {
       if ((error instanceof Error ? error.message : String(error)) === "paused") {
@@ -493,5 +557,58 @@ export class LlamaCppDownloadManager {
         ...(message ? { message } : {}),
       },
     });
+  }
+
+  private async registerCompletedTask(
+    task: DownloadTask,
+    metadata: DownloadTaskMetadata,
+  ): Promise<Stage3DownloadRecord> {
+    const registered = await this.#modelManager.registerLocalModel({
+      filePath: metadata.destinationPath,
+      ...(metadata.displayName ? { displayName: metadata.displayName } : {}),
+      ...(task.checksumSha256 ? { expectedChecksumSha256: task.checksumSha256 } : {}),
+      sourceKind: task.provider,
+      remoteUrl: metadata.remoteUrl ?? task.url,
+    });
+
+    const registeredTask: DownloadTask = {
+      ...task,
+      modelId: registered.artifact.id,
+      downloadedBytes: registered.artifact.sizeBytes,
+      totalBytes: registered.artifact.sizeBytes,
+      updatedAt: this.#now(),
+    };
+    this.#downloadsRepository.upsert(registeredTask);
+    this.publishProgress(registeredTask, `Indexed ${registered.profile.displayName}.`);
+    return this.toRecord(registeredTask);
+  }
+
+  private async maybeRegisterBundle(bundleId: string): Promise<Stage3DownloadRecord | undefined> {
+    const bundleTasks = this.#downloadsRepository.list().filter((task) => {
+      const metadata = toTaskMetadata(task);
+      return metadata.bundleId === bundleId;
+    });
+    if (bundleTasks.length === 0 || bundleTasks.some((task) => task.status !== "completed")) {
+      return undefined;
+    }
+
+    const primaryArtifactId = bundleTasks
+      .map((task) => toTaskMetadata(task).bundlePrimaryArtifactId)
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+    const primaryTask =
+      bundleTasks.find((task) => {
+        const metadata = toTaskMetadata(task);
+        return primaryArtifactId
+          ? metadata.artifactId === primaryArtifactId
+          : metadata.autoRegister;
+      }) ?? bundleTasks[0];
+    if (!primaryTask) {
+      return undefined;
+    }
+    if (primaryTask.modelId) {
+      return this.toRecord(primaryTask);
+    }
+
+    return await this.registerCompletedTask(primaryTask, toTaskMetadata(primaryTask));
   }
 }

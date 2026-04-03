@@ -1,13 +1,35 @@
 import type {
   DesktopDownloadTask,
+  DesktopProviderCatalogDetail,
   DesktopProviderSearchItem,
   DesktopShellState,
 } from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
+import { BACKGROUND_REFRESH_INTERVAL_MS } from "../constants";
 
 type DownloadsScreenProps = {
   shellState: DesktopShellState;
 };
+
+type CatalogDetailState =
+  | {
+      status: "idle";
+      warnings: string[];
+    }
+  | {
+      status: "loading";
+      warnings: string[];
+    }
+  | {
+      status: "ready";
+      warnings: string[];
+      data: DesktopProviderCatalogDetail;
+    }
+  | {
+      status: "error";
+      warnings: string[];
+      message: string;
+    };
 
 const formatBytes = (value: number | undefined): string => {
   if (!value || value <= 0) {
@@ -41,6 +63,8 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
   const [downloads, setDownloads] = useState<DesktopDownloadTask[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalogDetails, setCatalogDetails] = useState<Record<string, CatalogDetailState>>({});
+  const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (shellState.phase !== "connected") {
@@ -64,7 +88,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
     void refreshDownloads();
     const timer = window.setInterval(() => {
       void refreshDownloads();
-    }, 2_500);
+    }, BACKGROUND_REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -81,6 +105,8 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
       const response = await window.desktopApi.gateway.searchCatalog(query);
       setResults(response.data);
       setWarnings(response.warnings);
+      setCatalogDetails({});
+      setSelectedVariants({});
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to search providers.");
     } finally {
@@ -88,21 +114,82 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
     }
   };
 
-  const createDownload = async (item: DesktopProviderSearchItem) => {
+  const loadCatalogModel = async (item: DesktopProviderSearchItem) => {
+    setCatalogDetails((current) => ({
+      ...current,
+      [item.id]: {
+        status: "loading",
+        warnings: current[item.id]?.warnings ?? [],
+      },
+    }));
+
+    try {
+      const response = await window.desktopApi.gateway.getCatalogModel(
+        item.provider,
+        item.providerModelId,
+      );
+      setCatalogDetails((current) => ({
+        ...current,
+        [item.id]: {
+          status: "ready",
+          warnings: response.warnings,
+          data: response.data,
+        },
+      }));
+      setSelectedVariants((current) =>
+        current[item.id]
+          ? current
+          : {
+              ...current,
+              ...(response.data.variants[0] ? { [item.id]: response.data.variants[0].id } : {}),
+            },
+      );
+    } catch (reason) {
+      setCatalogDetails((current) => ({
+        ...current,
+        [item.id]: {
+          status: "error",
+          warnings: current[item.id]?.warnings ?? [],
+          message: reason instanceof Error ? reason.message : "Unable to load repository manifest.",
+        },
+      }));
+    }
+  };
+
+  const createDownload = async (detail: DesktopProviderCatalogDetail) => {
+    const selectedVariant =
+      detail.variants.find((variant) => variant.id === selectedVariants[detail.id]) ??
+      detail.variants[0];
+    if (!selectedVariant) {
+      return;
+    }
+
+    const bundleId = `${detail.id}:${selectedVariant.id}`;
+    const displayTitle =
+      selectedVariant.label === "Default"
+        ? detail.providerModelId
+        : `${detail.providerModelId} (${selectedVariant.label})`;
+
     setBusy(true);
     setError(null);
     try {
-      await window.desktopApi.gateway.createDownload({
-        provider: item.provider,
-        providerModelId: item.providerModelId,
-        artifactId: item.artifactId,
-        title: item.providerModelId,
-        artifactName: item.artifactName,
-        downloadUrl: item.downloadUrl,
-        ...(item.checksumSha256 ? { checksumSha256: item.checksumSha256 } : {}),
-        ...(item.sizeBytes !== undefined ? { sizeBytes: item.sizeBytes } : {}),
-        metadata: item.metadata,
-      });
+      for (const file of selectedVariant.files) {
+        await window.desktopApi.gateway.createDownload({
+          provider: detail.provider,
+          providerModelId: detail.providerModelId,
+          artifactId: file.artifactId,
+          title: displayTitle,
+          artifactName: file.artifactName,
+          ...(file.checksumSha256 ? { checksumSha256: file.checksumSha256 } : {}),
+          ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+          metadata: {
+            ...file.metadata,
+            autoRegister: file.artifactId === selectedVariant.primaryArtifactId,
+            bundleId,
+            bundlePrimaryArtifactId: selectedVariant.primaryArtifactId,
+          },
+        });
+      }
       const updated = await window.desktopApi.gateway.listDownloads();
       setDownloads(updated.data);
     } catch (reason) {
@@ -136,7 +223,9 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
         <div>
           <span className="section-label">Discovery & downloads</span>
           <h3>Provider catalog</h3>
-          <p>Search remote catalog results and queue model artifacts from the desktop shell.</p>
+          <p>
+            Search repositories first, then load each repo manifest to choose a quantized build.
+          </p>
         </div>
         <div className="button-row">
           <input
@@ -176,38 +265,137 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
           {results.length === 0 ? (
             <div className="empty-panel compact-empty">
               <strong>No results yet.</strong>
-              <p>Run a search to discover downloadable artifacts.</p>
+              <p>Run a search to discover downloadable repositories.</p>
             </div>
           ) : (
-            results.map((item) => (
-              <article className="model-card" key={item.id}>
-                <div className="model-card-head">
-                  <h4>{item.title}</h4>
-                  <span className="status-pill status-pill-neutral">{item.provider}</span>
-                </div>
-                <p>{item.summary ?? item.description ?? "Provider model result."}</p>
-                <dl className="meta-grid compact-meta-grid">
-                  <div>
-                    <dt>Artifact</dt>
-                    <dd>{item.artifactName}</dd>
+            results.map((item) => {
+              const detailState: CatalogDetailState = catalogDetails[item.id] ?? {
+                status: "idle",
+                warnings: [],
+              };
+              const detail = detailState.status === "ready" ? detailState.data : undefined;
+              const selectedVariant =
+                detail?.variants.find((variant) => variant.id === selectedVariants[item.id]) ??
+                detail?.variants[0];
+
+              return (
+                <article className="search-result-item" key={item.id}>
+                  <div className="search-result-primary">
+                    <div className="model-card-head search-result-head">
+                      <div>
+                        <span className="section-label">Repository</span>
+                        <h4 className="search-result-title">{item.providerModelId}</h4>
+                        {item.title !== item.providerModelId ? (
+                          <p className="search-result-subtitle">{item.title}</p>
+                        ) : null}
+                      </div>
+                      <span className="status-pill status-pill-neutral">{item.provider}</span>
+                    </div>
+                    <p>{item.summary ?? item.description ?? "Provider repository result."}</p>
+
+                    {detailState.warnings.length > 0 ? (
+                      <p className="search-detail-note">{detailState.warnings.join(" ")}</p>
+                    ) : null}
+                    {detailState.status === "error" ? (
+                      <p className="search-detail-note search-detail-note-error">
+                        {detailState.message}
+                      </p>
+                    ) : null}
+
+                    {detail && detail.variants.length > 0 ? (
+                      <div className="field-stack search-result-selector">
+                        <label htmlFor={`variant-${item.id}`}>Quant method</label>
+                        <select
+                          id={`variant-${item.id}`}
+                          onChange={(event) =>
+                            setSelectedVariants((current) => ({
+                              ...current,
+                              [item.id]: event.target.value,
+                            }))
+                          }
+                          value={selectedVariant?.id ?? ""}
+                        >
+                          {detail.variants.map((variant) => (
+                            <option key={variant.id} value={variant.id}>
+                              {`${variant.label} / ${variant.files.length} file${variant.files.length === 1 ? "" : "s"} / ${formatSize(variant.totalSizeBytes)}`}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : null}
                   </div>
-                  <div>
-                    <dt>Size</dt>
-                    <dd>{formatBytes(item.sizeBytes)}</dd>
+
+                  <div className="search-result-secondary">
+                    <dl className="meta-grid compact-meta-grid search-result-meta">
+                      <div>
+                        <dt>Formats</dt>
+                        <dd>{item.formats.join(", ") || "Unknown"}</dd>
+                      </div>
+                      <div>
+                        <dt>Downloads</dt>
+                        <dd>{formatCount(item.downloads)}</dd>
+                      </div>
+                      <div>
+                        <dt>Updated</dt>
+                        <dd>{formatUpdatedAt(item.updatedAt)}</dd>
+                      </div>
+                      <div>
+                        <dt>Variants</dt>
+                        <dd>
+                          {detail
+                            ? detail.variants.length
+                            : detailState.status === "loading"
+                              ? "Loading"
+                              : "Not loaded"}
+                        </dd>
+                      </div>
+                      {selectedVariant ? (
+                        <>
+                          <div>
+                            <dt>Files</dt>
+                            <dd>
+                              {selectedVariant.files.length} GGUF file
+                              {selectedVariant.files.length === 1 ? "" : "s"}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Size</dt>
+                            <dd>{formatSize(selectedVariant.totalSizeBytes)}</dd>
+                          </div>
+                        </>
+                      ) : null}
+                    </dl>
+                    <div className="button-row search-result-actions">
+                      {detailState.status !== "ready" ? (
+                        <button
+                          className="secondary-button"
+                          disabled={detailState.status === "loading"}
+                          onClick={() => void loadCatalogModel(item)}
+                          type="button"
+                        >
+                          {detailState.status === "loading"
+                            ? "Loading variants..."
+                            : "Show variants"}
+                        </button>
+                      ) : detail && detail.variants.length > 0 ? (
+                        <button
+                          className="secondary-button"
+                          disabled={busy}
+                          onClick={() => void createDownload(detail)}
+                          type="button"
+                        >
+                          {selectedVariant && selectedVariant.files.length > 1
+                            ? "Download all files"
+                            : "Download"}
+                        </button>
+                      ) : (
+                        <span className="status-pill status-pill-neutral">No GGUF variants</span>
+                      )}
+                    </div>
                   </div>
-                </dl>
-                <div className="button-row">
-                  <button
-                    className="secondary-button"
-                    disabled={busy}
-                    onClick={() => void createDownload(item)}
-                    type="button"
-                  >
-                    Download
-                  </button>
-                </div>
-              </article>
-            ))
+                </article>
+              );
+            })
           )}
         </div>
       </article>
@@ -249,8 +437,14 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                     </button>
                   )}
                   {task.status === "completed" ? (
-                    <span className="status-pill status-pill-positive">
-                      Ready to register in Model Library
+                    <span
+                      className={
+                        task.modelId
+                          ? "status-pill status-pill-positive"
+                          : "status-pill status-pill-neutral"
+                      }
+                    >
+                      {task.modelId ? "Ready to register in Model Library" : "Bundle file complete"}
                     </span>
                   ) : null}
                 </div>
