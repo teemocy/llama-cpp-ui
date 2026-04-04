@@ -150,6 +150,7 @@ function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig
     publicPort: 11434,
     controlHost: "127.0.0.1",
     controlPort: 11435,
+    localModelsDir: path.join(os.tmpdir(), "localhub-gateway-models"),
     publicBearerToken: "public-secret-stage3",
     controlBearerToken: "control-secret-stage3",
     corsAllowlist: ["localhost", "127.0.0.1"],
@@ -254,6 +255,7 @@ describe("gateway stage 3 runtime", () => {
       },
       preferFakeWorker: true,
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       telemetryIntervalMs: 50,
       providerSearch: new ProviderSearchService([
         new FakeProvider({

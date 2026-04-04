@@ -389,6 +389,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     const modelsRepository = new ModelsRepository(database.database);
     const manager = new LlamaCppModelManager({
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       adapter: createLlamaCppAdapter({
         supportRoot,
         preferFakeWorker: true,
@@ -480,6 +481,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     const modelsRepository = new ModelsRepository(database.database);
     const manager = new LlamaCppModelManager({
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       adapter: createLlamaCppAdapter({
         supportRoot,
         preferFakeWorker: true,
@@ -552,6 +554,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     const modelsRepository = new ModelsRepository(database.database);
     const manager = new LlamaCppModelManager({
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       adapter: createLlamaCppAdapter({
         supportRoot,
         preferFakeWorker: true,
@@ -621,6 +624,7 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     });
 
     await waitFor(() => downloads.listDownloads().every((task) => task.status === "completed"));
+    await waitFor(() => modelsRepository.list().length === 1);
 
     const storedModel = modelsRepository.list();
     expect(storedModel).toHaveLength(1);

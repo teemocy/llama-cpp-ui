@@ -35,6 +35,8 @@ import {
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
+  type DesktopEngineInstallRequest,
+  type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
   type DesktopModelConfigUpdateRequest,
   type DesktopModelConfigUpdateResponse,
@@ -52,6 +54,7 @@ import {
   desktopChatSessionListSchema,
   desktopDownloadActionResponseSchema,
   desktopDownloadListSchema,
+  desktopEngineInstallResponseSchema,
   desktopLocalModelImportRequestSchema,
   desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
@@ -97,7 +100,9 @@ import {
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
-const DEFAULT_LOAD_TIMEOUT_MS = 5_000;
+// Real `llama-server` startups can take a while on large GGUFs, so keep the
+// readiness window generous enough for local model loads.
+const DEFAULT_LOAD_TIMEOUT_MS = 60_000;
 const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 1_500;
 const DEFAULT_WORKER_STOP_TIMEOUT_MS = 2_000;
@@ -329,6 +334,7 @@ interface RepositoryGatewayRuntimeOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   supportRoot?: string;
+  localModelsDir: string;
   telemetryIntervalMs: number;
   defaultModelTtlMs: number;
   preferFakeWorker?: boolean;
@@ -736,6 +742,31 @@ function createFakeEmbeddingsResponse(input: EmbeddingsRequest): EmbeddingsRespo
   };
 }
 
+export function normalizeEmbeddingsResponsePayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") {
+    return payload;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const usage = record.usage;
+  if (!usage || typeof usage !== "object") {
+    return payload;
+  }
+
+  const usageRecord = usage as Record<string, unknown>;
+  if (typeof usageRecord.completion_tokens === "number") {
+    return payload;
+  }
+
+  return {
+    ...record,
+    usage: {
+      ...usageRecord,
+      completion_tokens: 0,
+    },
+  };
+}
+
 function toRuntimeModelRecord(
   stored: StoredModelRecord,
   snapshot?: RuntimeSnapshot,
@@ -974,6 +1005,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
     this.#modelManager = new LlamaCppModelManager({
       supportRoot: this.#supportRoot,
+      localModelsDir: options.localModelsDir,
       adapter: this.#adapter,
       modelsRepository: this.#modelsRepository,
       engineVersionsRepository: this.#enginesRepository,
@@ -1005,6 +1037,16 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       undefined,
       "system",
     );
+    const discoveredModels = await this.#modelManager.scanLocalModels();
+    if (discoveredModels.length > 0) {
+      this.publishLog(
+        "info",
+        `Auto-discovered ${discoveredModels.length} local model(s) from the configured scan path.`,
+        undefined,
+        undefined,
+        "system",
+      );
+    }
     this.replayModelSnapshots();
 
     this.#telemetryTimer = setInterval(() => {
@@ -1337,6 +1379,52 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   listEngines(): EngineRecord[] {
     return this.#enginesRepository.list().map((record) => toEngineRecord(record));
+  }
+
+  async installEngineBinary(
+    input: DesktopEngineInstallRequest,
+    traceId?: string,
+  ): Promise<DesktopEngineInstallResponse> {
+    this.assertAcceptingNewWork();
+    const normalizedTraceId = normalizeTraceId(traceId);
+
+    const installResult =
+      input.action === "download-latest-metal"
+        ? await this.#modelManager.downloadPackagedMetalBinary({
+            ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+          })
+        : input.action === "import-local-binary"
+          ? await this.#modelManager.importLocalEngineBinary({
+              sourcePath: input.filePath,
+              ...(input.versionTag ? { versionTag: input.versionTag } : {}),
+            })
+          : await this.#modelManager.activateEngineVersion(input.versionTag);
+
+    const stored = this.#enginesRepository
+      .list()
+      .find(
+        (record) =>
+          record.engineType === DEFAULT_ENGINE_TYPE &&
+          record.versionTag === installResult.versionTag,
+      );
+
+    if (!stored) {
+      throw new Error(`Installed llama.cpp version ${installResult.versionTag} could not be recorded.`);
+    }
+
+    this.publishLog(
+      "info",
+      installResult.notes.join(" "),
+      normalizedTraceId,
+      undefined,
+      "desktop",
+    );
+
+    return desktopEngineInstallResponseSchema.parse({
+      accepted: true,
+      engine: toEngineRecord(stored),
+      notes: installResult.notes,
+    });
   }
 
   getHealthSnapshot(plane: GatewayPlane): ControlHealthSnapshot {
@@ -1702,7 +1790,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/embeddings", input);
       const payload = embeddingsResponseSchema.parse(
-        this.#adapter.normalizeResponse(await response.json()),
+        normalizeEmbeddingsResponsePayload(this.#adapter.normalizeResponse(await response.json())),
       );
 
       this.insertApiLog({

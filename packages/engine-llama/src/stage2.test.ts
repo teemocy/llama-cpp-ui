@@ -20,6 +20,17 @@ enum TestGgufValueType {
   Uint64 = 10,
 }
 
+interface SampleGgufOptions {
+  modelName?: string;
+  architecture?: string;
+  quantization?: string;
+  contextLength?: number;
+  embeddingLength?: number;
+  parameterCount?: number;
+  tokenizer?: string;
+  chatTemplate?: string;
+}
+
 function uint32Buffer(value: number): Buffer {
   const buffer = Buffer.alloc(4);
   buffer.writeUInt32LE(value, 0);
@@ -67,18 +78,53 @@ async function createSupportRoot(): Promise<string> {
   return directory;
 }
 
-async function writeSampleGgufFile(targetPath: string): Promise<void> {
+async function writeSampleGgufFile(
+  targetPath: string,
+  options: SampleGgufOptions = {},
+): Promise<void> {
   await mkdir(path.dirname(targetPath), { recursive: true });
 
   const entries = [
-    createMetadataEntry("general.name", TestGgufValueType.String, "Stage2 Tiny Chat"),
-    createMetadataEntry("general.architecture", TestGgufValueType.String, "llama"),
-    createMetadataEntry("general.quantization", TestGgufValueType.String, "Q4_K_M"),
-    createMetadataEntry("llama.context_length", TestGgufValueType.Uint32, 8192),
-    createMetadataEntry("llama.embedding_length", TestGgufValueType.Uint32, 4096),
-    createMetadataEntry("general.parameter_count", TestGgufValueType.Uint64, 123456789),
-    createMetadataEntry("tokenizer.ggml.model", TestGgufValueType.String, "gpt2"),
-    createMetadataEntry("tokenizer.chat_template", TestGgufValueType.String, "<s>{{prompt}}</s>"),
+    createMetadataEntry(
+      "general.name",
+      TestGgufValueType.String,
+      options.modelName ?? "Stage2 Tiny Chat",
+    ),
+    createMetadataEntry(
+      "general.architecture",
+      TestGgufValueType.String,
+      options.architecture ?? "llama",
+    ),
+    createMetadataEntry(
+      "general.quantization",
+      TestGgufValueType.String,
+      options.quantization ?? "Q4_K_M",
+    ),
+    createMetadataEntry(
+      `${options.architecture ?? "llama"}.context_length`,
+      TestGgufValueType.Uint32,
+      options.contextLength ?? 8192,
+    ),
+    createMetadataEntry(
+      `${options.architecture ?? "llama"}.embedding_length`,
+      TestGgufValueType.Uint32,
+      options.embeddingLength ?? 4096,
+    ),
+    createMetadataEntry(
+      "general.parameter_count",
+      TestGgufValueType.Uint64,
+      options.parameterCount ?? 123456789,
+    ),
+    createMetadataEntry(
+      "tokenizer.ggml.model",
+      TestGgufValueType.String,
+      options.tokenizer ?? "gpt2",
+    ),
+    createMetadataEntry(
+      "tokenizer.chat_template",
+      TestGgufValueType.String,
+      options.chatTemplate ?? "<s>{{prompt}}</s>",
+    ),
   ];
 
   const payload = Buffer.concat([
@@ -147,6 +193,7 @@ describe("llama.cpp stage 2 vertical slice", () => {
 
     const manager = new LlamaCppModelManager({
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       adapter: createLlamaCppAdapter({
         supportRoot,
         preferFakeWorker: true,
@@ -179,6 +226,125 @@ describe("llama.cpp stage 2 vertical slice", () => {
     );
   });
 
+  it("classifies embedding, rerank, and multimodal companion models from local GGUF metadata", async () => {
+    const supportRoot = await createSupportRoot();
+    const modelsRoot = path.join(supportRoot, "models");
+    const embeddingPath = path.join(modelsRoot, "stage2-embedding.gguf");
+    const rerankerPath = path.join(modelsRoot, "stage2-reranker.gguf");
+    const multimodalDir = path.join(modelsRoot, "stage2-multimodal");
+    const multimodalPath = path.join(multimodalDir, "stage2-vision-chat.gguf");
+    const mmprojPath = path.join(multimodalDir, "mmproj-stage2-vision-chat.gguf");
+
+    await writeSampleGgufFile(embeddingPath, {
+      modelName: "Stage2 Embedding",
+      architecture: "qwen3",
+      contextLength: 40960,
+      embeddingLength: 2560,
+      chatTemplate: "{{messages}}",
+    });
+    await writeSampleGgufFile(rerankerPath, {
+      modelName: "Stage2 Reranker",
+      architecture: "qwen3",
+      contextLength: 40960,
+      embeddingLength: 2560,
+      chatTemplate: "{{messages}}",
+    });
+    await writeSampleGgufFile(multimodalPath, {
+      modelName: "Stage2 Vision Chat",
+      architecture: "qwen35moe",
+      contextLength: 262144,
+      embeddingLength: 2048,
+      chatTemplate: "<|vision_start|><|image_pad|><|vision_end|>{{messages}}",
+    });
+    await writeSampleGgufFile(mmprojPath, {
+      modelName: "Stage2 Vision Chat Projector",
+      architecture: "clip",
+      embeddingLength: 1024,
+      chatTemplate: "",
+    });
+
+    const testDatabase = createTestDatabase();
+    cleanups.push(testDatabase.cleanup);
+
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository: new ModelsRepository(testDatabase.database),
+      engineVersionsRepository: new EngineVersionsRepository(testDatabase.database),
+    });
+
+    const embeddingModel = await manager.registerLocalModel({
+      filePath: embeddingPath,
+    });
+    const rerankerModel = await manager.registerLocalModel({
+      filePath: rerankerPath,
+    });
+    const multimodalModel = await manager.registerLocalModel({
+      filePath: multimodalPath,
+    });
+
+    expect(embeddingModel.artifact.capabilities.embeddings).toBe(true);
+    expect(embeddingModel.artifact.capabilities.chat).toBe(false);
+    expect(embeddingModel.profile.role).toBe("embeddings");
+
+    expect(rerankerModel.artifact.capabilities.rerank).toBe(true);
+    expect(rerankerModel.artifact.capabilities.chat).toBe(false);
+    expect(rerankerModel.profile.role).toBe("rerank");
+
+    expect(multimodalModel.artifact.capabilities.chat).toBe(true);
+    expect(multimodalModel.artifact.capabilities.vision).toBe(true);
+    expect(multimodalModel.profile.role).toBe("chat");
+    expect(multimodalModel.artifact.metadata.metadata.mmprojPath).toBe(mmprojPath);
+  });
+
+  it("auto-discovers GGUFs in the configured local models directory and skips projector sidecars", async () => {
+    const supportRoot = await createSupportRoot();
+    const localModelsDir = path.join(supportRoot, "scan");
+    const chatPath = path.join(localModelsDir, "nested", "stage2-scan-chat.gguf");
+    const projectorPath = path.join(localModelsDir, "nested", "mmproj-stage2-scan-chat.gguf");
+
+    await writeSampleGgufFile(chatPath, {
+      modelName: "Stage2 Scan Chat",
+      architecture: "llama",
+      chatTemplate: "<s>{{prompt}}</s>",
+    });
+    await writeSampleGgufFile(projectorPath, {
+      modelName: "Stage2 Scan Projector",
+      architecture: "clip",
+      chatTemplate: "",
+    });
+
+    const testDatabase = createTestDatabase();
+    cleanups.push(testDatabase.cleanup);
+
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir,
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository: new ModelsRepository(testDatabase.database),
+      engineVersionsRepository: new EngineVersionsRepository(testDatabase.database),
+    });
+
+    const scanned = await manager.scanLocalModels();
+
+    expect(scanned).toHaveLength(1);
+    expect(scanned[0]?.indexed.localPath).toBe(chatPath);
+    expect(manager.listIndexedModels()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          localPath: chatPath,
+        }),
+      ]),
+    );
+  });
+
   it("launches a registered local artifact, reports readiness, and shuts down cleanly", async () => {
     const supportRoot = await createSupportRoot();
     const artifactPath = path.join(supportRoot, "models", "stage2-tiny-chat.gguf");
@@ -189,6 +355,7 @@ describe("llama.cpp stage 2 vertical slice", () => {
 
     const manager = new LlamaCppModelManager({
       supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
       adapter: createLlamaCppAdapter({
         supportRoot,
         preferFakeWorker: true,

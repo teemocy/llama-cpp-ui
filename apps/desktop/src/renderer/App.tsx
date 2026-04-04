@@ -1,7 +1,11 @@
 import type {
   DesktopEngineRecord,
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelConfigUpdateRequest,
+  DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
   DesktopShellState,
   GatewayEvent,
@@ -13,13 +17,37 @@ import { HashRouter, NavLink, Route, Routes } from "react-router-dom";
 import { ChatScreen } from "./screens/ChatScreen";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { DownloadsScreen } from "./screens/DownloadsScreen";
+import { ObservabilityScreen } from "./screens/ObservabilityScreen";
 import { ModelsScreen } from "./screens/ModelsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { BACKGROUND_REFRESH_INTERVAL_MS } from "./constants";
 
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
   discoveryFile: string;
+};
+
+type DesktopRuntimeContext = {
+  desktop: {
+    closeToTray: boolean;
+    autoLaunchGateway: boolean;
+    theme: "system" | "light" | "dark";
+  };
+  gateway: {
+    enableLan: boolean;
+    authRequired: boolean;
+    publicHost: string;
+    controlHost: string;
+    corsAllowlist: string[];
+    defaultModelTtlMs: number;
+    localModelsDir: string;
+    authConfigured: boolean;
+  };
+  files: {
+    desktopConfigFile: string;
+    gatewayConfigFile: string;
+  };
 };
 
 const initialShellState: DesktopShellState = {
@@ -37,6 +65,7 @@ const navItems = [
   { to: "/models", label: "Model Library" },
   { to: "/downloads", label: "Downloads" },
   { to: "/chat", label: "Chat Sandbox" },
+  { to: "/observability", label: "Observability" },
   { to: "/settings", label: "Settings" },
 ] as const;
 
@@ -94,9 +123,11 @@ export function App() {
   const [engines, setEngines] = useState<DesktopEngineRecord[]>([]);
   const [health, setHealth] = useState<GatewayHealthSnapshot | null>(null);
   const [paths, setPaths] = useState<DesktopSystemPaths | null>(null);
+  const [runtimeContext, setRuntimeContext] = useState<DesktopRuntimeContext | null>(null);
   const [events, setEvents] = useState<GatewayEvent[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState<"restart" | "shutdown" | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -112,6 +143,11 @@ export function App() {
         setPaths(value);
       }
     });
+    void window.desktopApi.system.getRuntimeContext().then((value) => {
+      if (!disposed) {
+        setRuntimeContext(value);
+      }
+    });
 
     const unsubscribeState = window.desktopApi.shell.onStateChange((state) => {
       startTransition(() => {
@@ -121,7 +157,7 @@ export function App() {
 
     const unsubscribeEvents = window.desktopApi.gateway.subscribeEvents((event) => {
       startTransition(() => {
-        setEvents((current) => [event, ...current].slice(0, 14));
+        setEvents((current) => [event, ...current].slice(0, 40));
       });
 
       if (event.type === "MODEL_STATE_CHANGED") {
@@ -163,7 +199,7 @@ export function App() {
 
     const interval = window.setInterval(() => {
       void refresh();
-    }, 7_500);
+    }, BACKGROUND_REFRESH_INTERVAL_MS);
 
     return () => {
       cancelled = true;
@@ -178,16 +214,10 @@ export function App() {
     }
 
     setSelectedModelId((current) =>
-      current && modelLibrary.some((model) => model.id === current)
-        ? current
-        : modelLibrary[0]!.id,
+      current && modelLibrary.some((model) => model.id === current) ? current : modelLibrary[0]!.id,
     );
   }, [modelLibrary]);
 
-  const latestMetrics = events.find((event) => event.type === "METRICS_TICK");
-  const latestTrace = events.find((event) => event.type === "REQUEST_TRACE");
-  const latestMetricsPayload = latestMetrics?.payload as Record<string, unknown> | undefined;
-  const latestTracePayload = latestTrace?.payload as Record<string, unknown> | undefined;
   const modelSummaries = modelLibrary.map((model) => toModelSummary(model));
   const activeEngineCount = engines.filter((engine) => engine.active).length;
 
@@ -197,8 +227,33 @@ export function App() {
     });
   };
 
+  const refreshRuntimeContext = async (): Promise<void> => {
+    const context = await window.desktopApi.system.getRuntimeContext();
+    startTransition(() => {
+      setRuntimeContext(context);
+    });
+  };
+
   const pickLocalModel = async (): Promise<string | null> => {
     const result = await window.desktopApi.gateway.openModelFileDialog();
+    if (result.canceled) {
+      return null;
+    }
+
+    return result.filePaths[0] ?? null;
+  };
+
+  const pickEngineBinary = async (): Promise<string | null> => {
+    const result = await window.desktopApi.gateway.openEngineBinaryDialog();
+    if (result.canceled) {
+      return null;
+    }
+
+    return result.filePaths[0] ?? null;
+  };
+
+  const pickModelsDirectory = async (): Promise<string | null> => {
+    const result = await window.desktopApi.system.pickModelsDirectory();
     if (result.canceled) {
       return null;
     }
@@ -217,6 +272,25 @@ export function App() {
     return result;
   };
 
+  const installEngineBinary = async (
+    payload: DesktopEngineInstallRequest,
+  ): Promise<DesktopEngineInstallResponse> => {
+    const result = await window.desktopApi.gateway.installEngineBinary(payload);
+    requestRefresh();
+    return result;
+  };
+
+  const activateEngineVersion = async (
+    versionTag: string,
+  ): Promise<DesktopEngineInstallResponse> => {
+    const result = await window.desktopApi.gateway.installEngineBinary({
+      action: "activate-installed-version",
+      versionTag,
+    });
+    requestRefresh();
+    return result;
+  };
+
   const preloadModel = async (modelId: string): Promise<void> => {
     await window.desktopApi.gateway.preloadModel(modelId);
     requestRefresh();
@@ -227,12 +301,49 @@ export function App() {
     requestRefresh();
   };
 
+  const updateModelConfig = async (
+    modelId: string,
+    payload: DesktopModelConfigUpdateRequest,
+  ): Promise<DesktopModelConfigUpdateResponse> => {
+    const result = await window.desktopApi.gateway.updateModelConfig(modelId, payload);
+    requestRefresh();
+    return result;
+  };
+
+  const updateModelsDirectory = async (modelsDir: string): Promise<void> => {
+    const updatedContext = await window.desktopApi.system.updateModelsDirectory(modelsDir);
+    startTransition(() => {
+      setRuntimeContext(updatedContext);
+    });
+    requestRefresh();
+  };
+
+  const restartGateway = async (): Promise<void> => {
+    setRecoveryBusy("restart");
+    try {
+      await window.desktopApi.gateway.restart();
+      await refreshRuntimeContext();
+      requestRefresh();
+    } finally {
+      setRecoveryBusy(null);
+    }
+  };
+
+  const shutdownGateway = async (): Promise<void> => {
+    setRecoveryBusy("shutdown");
+    try {
+      await window.desktopApi.gateway.shutdown();
+      requestRefresh();
+    } finally {
+      setRecoveryBusy(null);
+    }
+  };
+
   return (
     <HashRouter>
       <div className="app-shell">
         <aside className="sidebar">
           <div className="brand-card">
-            <span className="brand-eyebrow">Stage 3 User Flows</span>
             <h1>Local LLM Hub</h1>
             <p>Chat, downloads, and observability are now wired into the desktop control plane.</p>
           </div>
@@ -259,20 +370,6 @@ export function App() {
             </div>
             <small>Last event: {formatClock(shellState.lastEventAt)}</small>
           </section>
-
-          <section className="side-panel">
-            <span className="section-label">Runtime pulse</span>
-            <strong>
-              {typeof latestMetricsPayload?.activeWorkers === "number"
-                ? `${latestMetricsPayload.activeWorkers} active worker slots`
-                : "Waiting for telemetry"}
-            </strong>
-            <p>
-              {typeof latestTracePayload?.route === "string"
-                ? `Latest traced route: ${latestTracePayload.route}.`
-                : "The control plane will trace lifecycle requests once the first action runs."}
-            </p>
-          </section>
         </aside>
 
         <main className="content-shell">
@@ -297,11 +394,35 @@ export function App() {
             </div>
           </header>
 
+          {shellState.phase === "error" || shellState.phase === "stopped" ? (
+            <article className="wide-card feedback-card feedback-card-error">
+              <strong>
+                {shellState.phase === "error" ? "Gateway recovery required" : "Gateway is stopped"}
+              </strong>
+              <p>{shellState.lastError ?? shellState.message}</p>
+              <div className="button-row">
+                <button
+                  className="primary-button"
+                  disabled={recoveryBusy !== null}
+                  onClick={() => void restartGateway()}
+                  type="button"
+                >
+                  {recoveryBusy === "restart" ? "Restarting..." : "Restart gateway"}
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={recoveryBusy !== null}
+                  onClick={() => void shutdownGateway()}
+                  type="button"
+                >
+                  {recoveryBusy === "shutdown" ? "Stopping..." : "Shutdown"}
+                </button>
+              </div>
+            </article>
+          ) : null}
+
           <Routes>
-            <Route
-              path="/"
-              element={<DashboardScreen events={events} health={health} shellState={shellState} />}
-            />
+            <Route path="/" element={<DashboardScreen shellState={shellState} />} />
             <Route
               path="/models"
               element={
@@ -310,8 +431,12 @@ export function App() {
                   models={modelLibrary}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
+                  onPickEngineBinaryFile={pickEngineBinary}
                   onPreloadModel={preloadModel}
+                  onInstallEngineBinary={installEngineBinary}
+                  onActivateEngineVersion={activateEngineVersion}
                   onRegisterModel={registerLocalModel}
+                  onUpdateModelConfig={updateModelConfig}
                   onSelectModel={setSelectedModelId}
                   selectedModelId={selectedModelId}
                   shellState={shellState}
@@ -324,44 +449,27 @@ export function App() {
               element={<ChatScreen models={modelSummaries} shellState={shellState} />}
             />
             <Route
+              path="/observability"
+              element={
+                <ObservabilityScreen events={events} health={health} shellState={shellState} />
+              }
+            />
+            <Route
               path="/settings"
-              element={<SettingsScreen paths={paths} shellState={shellState} />}
+              element={
+                <SettingsScreen
+                  onPickModelsDirectory={pickModelsDirectory}
+                  onRestartGateway={restartGateway}
+                  onShutdownGateway={shutdownGateway}
+                  onUpdateModelsDirectory={updateModelsDirectory}
+                  paths={paths}
+                  runtimeContext={runtimeContext}
+                  shellState={shellState}
+                />
+              }
             />
           </Routes>
         </main>
-
-        <aside className="activity-rail">
-          <div className="rail-card">
-            <span className="section-label">Event feed</span>
-            <h3>Shared envelope</h3>
-            <p>
-              Runtime state, desktop actions, and control-plane traces all flow through the same
-              shared event contract.
-            </p>
-          </div>
-
-          <div className="event-list">
-            {events.length === 0 ? (
-              <div className="event-card event-card-empty">
-                Waiting for gateway telemetry to populate the feed.
-              </div>
-            ) : (
-              events.map((event) => (
-                <article className="event-card" key={`${event.traceId}-${event.ts}`}>
-                  <div className="event-head">
-                    <strong>{event.type}</strong>
-                    <span>{formatClock(event.ts)}</span>
-                  </div>
-                  <p>
-                    {event.type === "LOG_STREAM"
-                      ? ((event.payload as { message?: string }).message ?? "Gateway log")
-                      : (JSON.stringify(event.payload) ?? "")}
-                  </p>
-                </article>
-              ))
-            )}
-          </div>
-        </aside>
       </div>
     </HashRouter>
   );

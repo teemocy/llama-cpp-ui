@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   BrowserWindow,
@@ -13,6 +15,7 @@ import {
   loadDesktopConfig,
   loadGatewayConfig as loadPlatformGatewayConfig,
   resolveAppPaths,
+  writeConfigFile,
 } from "@localhub/platform";
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
@@ -31,6 +34,7 @@ export type DesktopRuntimeContext = {
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
+    localModelsDir: string;
     authConfigured: boolean;
   };
   files: {
@@ -54,11 +58,11 @@ const desktopConfig = loadDesktopConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
 });
-const gatewayConfig = loadGatewayConfig({
+let gatewayConfig = loadGatewayConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
 });
-const sharedGatewayConfig = loadPlatformGatewayConfig({
+let sharedGatewayConfig = loadPlatformGatewayConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
 });
@@ -106,6 +110,55 @@ const showWindow = (): void => {
   mainWindow.focus();
 };
 
+const normalizeLocalModelsDir = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error("Local models directory cannot be empty.");
+  }
+
+  const expanded =
+    trimmed === "~"
+      ? os.homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(os.homedir(), trimmed.slice(2))
+        : trimmed;
+
+  return path.isAbsolute(expanded) ? expanded : path.resolve(appPaths.supportRoot, expanded);
+};
+
+const buildRuntimeContext = (): DesktopRuntimeContext => ({
+  desktop: {
+    closeToTray: desktopConfig.value.closeToTray,
+    autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
+    theme: desktopConfig.value.theme,
+  },
+  gateway: {
+    enableLan: sharedGatewayConfig.value.enableLan,
+    authRequired: sharedGatewayConfig.value.authRequired,
+    publicHost: gatewayConfig.publicHost,
+    controlHost: gatewayConfig.controlHost,
+    corsAllowlist: [...gatewayConfig.corsAllowlist],
+    defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
+    localModelsDir: gatewayConfig.localModelsDir,
+    authConfigured: Boolean(gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken),
+  },
+  files: {
+    desktopConfigFile: appPaths.desktopConfigFile,
+    gatewayConfigFile: appPaths.gatewayConfigFile,
+  },
+});
+
+const reloadGatewayConfig = (): void => {
+  gatewayConfig = loadGatewayConfig({
+    cwd: workspaceRoot,
+    environment: runtimeEnvironment,
+  });
+  sharedGatewayConfig = loadPlatformGatewayConfig({
+    cwd: workspaceRoot,
+    environment: runtimeEnvironment,
+  });
+};
+
 const createWindow = async (): Promise<void> => {
   mainWindow = new BrowserWindow({
     width: 1460,
@@ -113,7 +166,6 @@ const createWindow = async (): Promise<void> => {
     minWidth: 1180,
     minHeight: 760,
     backgroundColor: "#f4efe6",
-    titleBarStyle: "hiddenInset",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -167,6 +219,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayListModelLibrary, () => gatewayManager.listModelLibrary());
   ipcMain.handle(IPC_CHANNELS.gatewayGetHealth, () => gatewayManager.getHealth());
   ipcMain.handle(IPC_CHANNELS.gatewayListEngines, () => gatewayManager.listEngines());
+  ipcMain.handle(IPC_CHANNELS.gatewayInstallEngineBinary, (_event, payload) =>
+    gatewayManager.installEngineBinary(payload),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayRegisterLocalModel, (_event, payload) =>
     gatewayManager.registerLocalModel(payload),
   );
@@ -211,30 +266,32 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayRestart, () => gatewayManager.restart());
   ipcMain.handle(IPC_CHANNELS.gatewayShutdown, () => gatewayManager.shutdown());
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
+  ipcMain.handle(IPC_CHANNELS.systemGetRuntimeContext, (): DesktopRuntimeContext =>
+    buildRuntimeContext(),
+  );
+  ipcMain.handle(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog, async () => {
+    const options = {
+      title: "Choose a local models directory",
+      properties: ["openDirectory"] as Array<"openDirectory">,
+      filters: [],
+    };
+
+    return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
+  });
   ipcMain.handle(
-    IPC_CHANNELS.systemGetRuntimeContext,
-    (): DesktopRuntimeContext => ({
-      desktop: {
-        closeToTray: desktopConfig.value.closeToTray,
-        autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
-        theme: desktopConfig.value.theme,
-      },
-      gateway: {
-        enableLan: sharedGatewayConfig.value.enableLan,
-        authRequired: sharedGatewayConfig.value.authRequired,
-        publicHost: gatewayConfig.publicHost,
-        controlHost: gatewayConfig.controlHost,
-        corsAllowlist: [...gatewayConfig.corsAllowlist],
-        defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
-        authConfigured: Boolean(
-          gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken,
-        ),
-      },
-      files: {
-        desktopConfigFile: appPaths.desktopConfigFile,
-        gatewayConfigFile: appPaths.gatewayConfigFile,
-      },
-    }),
+    IPC_CHANNELS.systemUpdateModelsDirectory,
+    async (_event, rawModelsDir: string): Promise<DesktopRuntimeContext> => {
+      const modelsDir = normalizeLocalModelsDir(rawModelsDir);
+      mkdirSync(modelsDir, { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        localModelsDir: modelsDir,
+      });
+      reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
   );
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelDialog, async () => {
     const options = {
@@ -246,6 +303,15 @@ const registerIpcHandlers = (): void => {
           extensions: ["gguf", "bin"],
         },
       ],
+    };
+
+    return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
+  });
+  ipcMain.handle(IPC_CHANNELS.gatewayOpenEngineBinaryDialog, async () => {
+    const options = {
+      title: "Pick a llama.cpp binary or containing folder",
+      properties: ["openFile", "openDirectory"] as Array<"openFile" | "openDirectory">,
+      filters: [],
     };
 
     return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);

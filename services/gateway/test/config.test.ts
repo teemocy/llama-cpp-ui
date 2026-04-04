@@ -36,6 +36,7 @@ describe("loadGatewayConfig", () => {
         LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT: "9001",
         LOCAL_LLM_HUB_GATEWAY_CONTROL_PORT: "9002",
         LOCAL_LLM_HUB_GATEWAY_TELEMETRY_INTERVAL_MS: "2500",
+        LOCAL_LLM_HUB_MODELS_DIR: "~/custom-models",
       },
     });
 
@@ -44,5 +45,6 @@ describe("loadGatewayConfig", () => {
     expect(config.telemetryIntervalMs).toBe(2500);
     expect(config.publicBearerToken).toBe("stage1-shared-token");
     expect(config.controlBearerToken).toBe("stage1-shared-token");
+    expect(config.localModelsDir).toBe(path.join(os.homedir(), "custom-models"));
   });
 });

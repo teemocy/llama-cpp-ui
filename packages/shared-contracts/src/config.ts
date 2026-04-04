@@ -1,4 +1,6 @@
 import { z } from "zod";
+import os from "node:os";
+import path from "node:path";
 
 import {
   CONTRACT_SCHEMA_VERSION,
@@ -23,6 +25,7 @@ export const gatewayConfigRecordSchema = z.object({
   logLevel: logLevelSchema.default("info"),
   defaultModelTtlMs: positiveIntegerSchema.default(900000),
   requestTraceRetentionDays: z.number().int().positive().default(30),
+  localModelsDir: fileSystemPathSchema.default(path.join(os.homedir(), ".llm_hub", "models")),
 });
 
 export const desktopConfigRecordSchema = z.object({

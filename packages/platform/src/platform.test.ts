@@ -64,6 +64,7 @@ describe("platform helpers", () => {
 
     expect(config.value.publicPort).toBe(9000);
     expect(config.value.enableLan).toBe(true);
+    expect(config.value.localModelsDir).toBe(path.join(os.homedir(), ".llm_hub", "models"));
     expect(config.sources).toContain("env");
   });
 

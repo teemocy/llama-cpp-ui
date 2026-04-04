@@ -9,9 +9,13 @@ import type {
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelConfigUpdateRequest,
+  DesktopModelConfigUpdateResponse,
   DesktopModelLibrary,
   DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
@@ -25,6 +29,28 @@ type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
   discoveryFile: string;
+};
+
+type DesktopRuntimeContext = {
+  desktop: {
+    closeToTray: boolean;
+    autoLaunchGateway: boolean;
+    theme: "system" | "light" | "dark";
+  };
+  gateway: {
+    enableLan: boolean;
+    authRequired: boolean;
+    publicHost: string;
+    controlHost: string;
+    corsAllowlist: string[];
+    defaultModelTtlMs: number;
+    localModelsDir: string;
+    authConfigured: boolean;
+  };
+  files: {
+    desktopConfigFile: string;
+    gatewayConfigFile: string;
+  };
 };
 
 type FileDialogResult = {
@@ -44,7 +70,16 @@ type DesktopApi = {
     listModelLibrary(): Promise<DesktopModelLibrary>;
     getHealth(): Promise<GatewayHealthSnapshot>;
     listEngines(): Promise<DesktopEngineList>;
-    registerLocalModel(payload: DesktopLocalModelImportRequest): Promise<DesktopLocalModelImportResponse>;
+    installEngineBinary(
+      payload: DesktopEngineInstallRequest,
+    ): Promise<DesktopEngineInstallResponse>;
+    registerLocalModel(
+      payload: DesktopLocalModelImportRequest,
+    ): Promise<DesktopLocalModelImportResponse>;
+    updateModelConfig(
+      modelId: string,
+      payload: DesktopModelConfigUpdateRequest,
+    ): Promise<DesktopModelConfigUpdateResponse>;
     preloadModel(modelId: string): Promise<void>;
     evictModel(modelId: string): Promise<void>;
     listChatSessions(): Promise<DesktopChatSessionList>;
@@ -61,11 +96,17 @@ type DesktopApi = {
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
     resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    restart(): Promise<void>;
+    shutdown(): Promise<void>;
     subscribeEvents(listener: (event: GatewayEvent) => void): Unsubscribe;
     openModelFileDialog(): Promise<FileDialogResult>;
+    openEngineBinaryDialog(): Promise<FileDialogResult>;
   };
   system: {
     getPaths(): Promise<DesktopSystemPaths>;
+    getRuntimeContext(): Promise<DesktopRuntimeContext>;
+    pickModelsDirectory(): Promise<FileDialogResult>;
+    updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
   };
 };
 

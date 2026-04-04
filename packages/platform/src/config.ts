@@ -1,3 +1,5 @@
+import path from "node:path";
+import os from "node:os";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
@@ -48,6 +50,18 @@ function pickNumber(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function normalizeModelsDir(rawValue: string, baseDir: string): string {
+  const trimmed = rawValue.trim();
+  const expanded =
+    trimmed === "~"
+      ? os.homedir()
+      : trimmed.startsWith("~/")
+        ? path.join(os.homedir(), trimmed.slice(2))
+        : trimmed;
+
+  return path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded);
+}
+
 function setIfDefined<T extends object, K extends keyof T>(
   target: Partial<T>,
   key: K,
@@ -89,6 +103,7 @@ export function loadGatewayConfig(
     "requestTraceRetentionDays",
     pickNumber(env.LOCAL_LLM_HUB_REQUEST_TRACE_RETENTION_DAYS),
   );
+  setIfDefined(envValues, "localModelsDir", env.LOCAL_LLM_HUB_MODELS_DIR);
 
   // Stage 2 freeze: shared config precedence is defaults < file < environment overrides.
   const merged = gatewayConfigRecordSchema.parse({
@@ -96,6 +111,10 @@ export function loadGatewayConfig(
     ...fileValues,
     ...envValues,
   });
+  const normalized = {
+    ...merged,
+    localModelsDir: normalizeModelsDir(merged.localModelsDir, paths.supportRoot),
+  };
 
   const sources: LoadedConfig<GatewayConfigRecord>["sources"] = ["defaults"];
 
@@ -107,7 +126,7 @@ export function loadGatewayConfig(
     sources.push("env");
   }
 
-  return { value: merged, filePath, sources };
+  return { value: normalized, filePath, sources };
 }
 
 export function loadDesktopConfig(

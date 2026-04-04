@@ -45,22 +45,21 @@ select {
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 320px;
+  grid-template-columns: 320px minmax(0, 1fr);
   gap: 18px;
   padding: 18px;
 }
 
 .sidebar,
-.activity-rail,
 .content-shell {
   min-height: calc(100vh - 36px);
 }
 
-.sidebar,
-.activity-rail {
+.sidebar {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overflow: auto;
 }
 
 .brand-card,
@@ -113,14 +112,6 @@ select {
   letter-spacing: 0.14em;
   font-size: 0.72rem;
   color: rgba(20, 33, 61, 0.54);
-}
-
-.brand-eyebrow {
-  display: inline-block;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
-  font-size: 0.74rem;
-  color: rgba(184, 111, 34, 0.76);
 }
 
 .nav-stack {
@@ -281,11 +272,9 @@ select {
   border-color: rgba(184, 111, 34, 0.24);
 }
 
-.activity-rail .rail-card {
-  min-height: 160px;
-}
-
 .event-list {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -569,6 +558,11 @@ select {
   border: 1px solid rgba(178, 67, 44, 0.14);
 }
 
+.detail-alert-success {
+  background: rgba(234, 250, 244, 0.96);
+  border-color: rgba(47, 125, 93, 0.18);
+}
+
 .detail-alert strong {
   display: block;
   margin-bottom: 6px;
@@ -600,6 +594,14 @@ select {
   flex-direction: column;
   gap: 8px;
   margin-top: 18px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  color: var(--muted);
 }
 
 .text-input {
@@ -655,29 +657,69 @@ select {
   color: #b2432c;
 }
 
+.advanced-config-card {
+  margin-top: 24px;
+  padding: 20px;
+  border-radius: 22px;
+  background: rgba(20, 33, 61, 0.04);
+  border: 1px solid rgba(20, 33, 61, 0.08);
+}
+
 .chat-layout {
   display: grid;
-  grid-template-columns: minmax(300px, 0.72fr) minmax(0, 1.28fr);
-  gap: 16px;
+  grid-template-columns: minmax(320px, 340px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
 }
 
 .chat-session-list {
-  min-height: 640px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
 }
 
 .chat-main-panel {
-  display: grid;
-  grid-template-rows: auto minmax(220px, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
+  min-height: 0;
+  height: 100%;
+}
+
+.chat-session-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.chat-session-banner p {
+  margin-top: 8px;
+}
+
+.chat-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .chat-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.chat-controls .button-row {
+  grid-column: 1 / -1;
+  margin-top: 4px;
 }
 
 .chat-thread {
+  flex: 1 1 auto;
+  min-height: 360px;
   padding: 14px;
   border-radius: 18px;
   background: rgba(20, 33, 61, 0.04);
@@ -717,20 +759,112 @@ select {
   gap: 10px;
 }
 
+.chat-session-list .panel-header {
+  align-items: flex-start;
+}
+
+.chat-session-list .panel-header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  max-width: 40ch;
+}
+
+.chat-session-list .model-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
 .log-console {
   margin-top: 12px;
   border-radius: 16px;
   padding: 14px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #d9e5ff;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  background: linear-gradient(180deg, rgba(255, 253, 249, 0.98), rgba(247, 241, 232, 0.96));
+  color: var(--ink);
   font-family: "SF Mono", Menlo, monospace;
   font-size: 0.84rem;
-  max-height: 250px;
+  max-height: 320px;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .log-console p {
-  margin: 0 0 8px;
+  margin: 0;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.log-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  background: rgba(20, 33, 61, 0.08);
+  color: var(--ink);
+}
+
+.log-badge-debug {
+  background: rgba(73, 117, 164, 0.12);
+  color: #355982;
+}
+
+.log-badge-info {
+  background: rgba(47, 125, 93, 0.12);
+  color: #24694d;
+}
+
+.log-badge-warn {
+  background: rgba(184, 111, 34, 0.16);
+  color: #8a5714;
+}
+
+.log-badge-error {
+  background: rgba(178, 67, 44, 0.14);
+  color: #9d2b20;
+}
+
+.log-badge-trace {
+  background: rgba(38, 120, 108, 0.12);
+  color: #226a60;
+}
+
+.log-timestamp {
+  color: rgba(20, 33, 61, 0.56);
+}
+
+.observability-card {
+  min-height: 0;
+}
+
+.observability-card .meta-grid {
+  margin-top: 16px;
+}
+
+.observability-card .event-list {
+  margin-top: 12px;
+}
+
+.observability-card .log-console {
+  max-height: 280px;
+}
+
+.rail-note {
+  margin: 14px 0 0;
+  color: var(--muted);
 }
 
 @media (max-width: 1260px) {
@@ -738,17 +872,30 @@ select {
     grid-template-columns: 240px minmax(0, 1fr);
   }
 
-  .activity-rail {
-    grid-column: 1 / -1;
-    min-height: auto;
-  }
-
   .models-stage-grid {
     grid-template-columns: 1fr;
   }
+}
 
+@media (max-width: 1080px) {
   .chat-layout {
     grid-template-columns: 1fr;
+  }
+
+  .chat-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-controls .button-row {
+    grid-column: auto;
+  }
+
+  .chat-session-banner {
+    flex-direction: column;
+  }
+
+  .chat-session-meta {
+    justify-content: flex-start;
   }
 }
 
@@ -758,7 +905,6 @@ select {
   }
 
   .sidebar,
-  .activity-rail,
   .content-shell {
     min-height: auto;
   }

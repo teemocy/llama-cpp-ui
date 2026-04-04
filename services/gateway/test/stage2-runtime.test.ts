@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ import {
   fixtureModelProfile,
   openDatabase,
 } from "@localhub/db";
+import { readEngineVersionRegistry, resolveEngineSupportPaths } from "@localhub/engine-core";
 import { resolveAppPaths } from "@localhub/platform";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -138,6 +139,7 @@ function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig
     publicPort: 11434,
     controlHost: "127.0.0.1",
     controlPort: 11435,
+    localModelsDir: path.join(os.tmpdir(), "localhub-gateway-models"),
     publicBearerToken: "public-secret-stage2",
     controlBearerToken: "control-secret-stage2",
     corsAllowlist: ["localhost", "127.0.0.1"],
@@ -209,6 +211,7 @@ async function createStage2Fixture(
     fakeWorkerStartupDelayMs: 25,
     preferFakeWorker: true,
     supportRoot,
+    localModelsDir: path.join(supportRoot, "models"),
     telemetryIntervalMs: 50,
     ...options.runtimeOverrides,
   });
@@ -324,6 +327,173 @@ describe("gateway stage 2 runtime", () => {
         }),
       ]),
     });
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("imports a local llama.cpp binary through the control route and packages it into support", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const sourceBinaryPath = path.join(
+      fixture.appPaths.supportRoot,
+      "downloads",
+      "custom-llama-server",
+    );
+
+    await mkdir(path.dirname(sourceBinaryPath), { recursive: true });
+    await writeFile(sourceBinaryPath, "#!/bin/sh\nexit 0\n");
+    await chmod(sourceBinaryPath, 0o755);
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const installResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/engines",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        action: "import-local-binary",
+        filePath: sourceBinaryPath,
+      },
+    });
+
+    const installBody = installResponse.json() as {
+      accepted: boolean;
+      engine: {
+        binaryPath?: string;
+        id: string;
+        version: string;
+      };
+      notes: string[];
+    };
+    const paths = resolveEngineSupportPaths(fixture.appPaths.supportRoot, "llama.cpp");
+    const registry = readEngineVersionRegistry(paths.registryFile, "llama.cpp");
+
+    expect(installResponse.statusCode).toBe(202);
+    expect(installBody.accepted).toBe(true);
+    expect(installBody.engine.binaryPath).toBeDefined();
+    expect(installBody.engine.binaryPath).not.toBe(sourceBinaryPath);
+    expect(installBody.engine.binaryPath?.startsWith(paths.versionsRoot)).toBe(true);
+    expect(installBody.notes).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Imported a local llama.cpp binary"),
+        expect.stringContaining("Packaged the binary inside"),
+      ]),
+    );
+    expect(registry.activeVersionTag).toBe(installBody.engine.version);
+    expect(registry.versions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          versionTag: installBody.engine.version,
+          binaryPath: installBody.engine.binaryPath,
+        }),
+      ]),
+    );
+
+    await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+  });
+
+  it("switches the active llama.cpp version across multiple installed binaries", async () => {
+    const fixture = await createStage2Fixture();
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime: fixture.runtime,
+    });
+    const sourceBinaryA = path.join(fixture.appPaths.supportRoot, "downloads", "llama-a");
+    const sourceBinaryB = path.join(fixture.appPaths.supportRoot, "downloads", "llama-b");
+
+    await mkdir(path.dirname(sourceBinaryA), { recursive: true });
+    await writeFile(sourceBinaryA, "#!/bin/sh\nexit 0\n");
+    await writeFile(sourceBinaryB, "#!/bin/sh\nexit 0\n");
+    await chmod(sourceBinaryA, 0o755);
+    await chmod(sourceBinaryB, 0o755);
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+    const installResponseA = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/engines",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        action: "import-local-binary",
+        filePath: sourceBinaryA,
+        versionTag: "llama-a",
+      },
+    });
+
+    const installResponseB = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/engines",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        action: "import-local-binary",
+        filePath: sourceBinaryB,
+        versionTag: "llama-b",
+      },
+    });
+
+    const activateResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/engines",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+      payload: {
+        action: "activate-installed-version",
+        versionTag: "llama-a",
+      },
+    });
+
+    const paths = resolveEngineSupportPaths(fixture.appPaths.supportRoot, "llama.cpp");
+    const registry = readEngineVersionRegistry(paths.registryFile, "llama.cpp");
+    const enginesResponse = await gateway.controlApp.inject({
+      method: "GET",
+      url: "/control/engines",
+      headers: {
+        authorization: "Bearer control-secret-stage2",
+      },
+    });
+    const enginesBody = enginesResponse.json() as {
+      data: Array<{
+        active: boolean;
+        binaryPath?: string;
+        version: string;
+      }>;
+    };
+
+    expect(installResponseA.statusCode).toBe(202);
+    expect(installResponseB.statusCode).toBe(202);
+    expect(activateResponse.statusCode).toBe(202);
+    expect(activateResponse.json()).toMatchObject({
+      accepted: true,
+      engine: expect.objectContaining({
+        version: "llama-a",
+        active: true,
+      }),
+      notes: expect.arrayContaining([
+        expect.stringContaining("Activated installed llama.cpp version llama-a"),
+      ]),
+    });
+    expect(registry.activeVersionTag).toBe("llama-a");
+    expect(enginesBody.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          version: "llama-a",
+          active: true,
+          binaryPath: expect.stringContaining(paths.versionsRoot),
+        }),
+        expect.objectContaining({
+          version: "llama-b",
+          active: false,
+        }),
+      ]),
+    );
 
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });

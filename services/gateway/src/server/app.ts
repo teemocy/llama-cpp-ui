@@ -10,8 +10,10 @@ import {
   chatCompletionsRequestSchema,
   desktopChatRunRequestSchema,
   desktopChatSessionUpsertRequestSchema,
+  desktopEngineInstallRequestSchema,
   desktopDownloadCreateRequestSchema,
   desktopLocalModelImportRequestSchema,
+  desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
 } from "@localhub/shared-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
@@ -312,10 +314,15 @@ async function registerControlApp(
       const result = await runtime.registerLocalModel(parsed.data, request.id);
       return reply.code(result.created ? 201 : 200).send(result);
     } catch (error) {
-      return reply.code(400).send({
-        error: "invalid_artifact",
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.code === "internal_error" ? 400 : formatted.statusCode).send({
+        error: formatted.code === "internal_error" ? "invalid_artifact" : formatted.code,
         message:
-          error instanceof Error ? error.message : "The selected local artifact could not be read.",
+          formatted.code === "internal_error"
+            ? error instanceof Error
+              ? error.message
+              : "The selected local artifact could not be read."
+            : formatted.message,
         requestId: request.id,
       });
     }
@@ -339,9 +346,17 @@ async function registerControlApp(
         model: result.model,
       });
     } catch (error) {
-      const statusCode = isUnknownModelError(error) ? 404 : 409;
-      return reply.code(statusCode).send({
-        error: statusCode === 404 ? "model_not_found" : "model_load_failed",
+      if (error instanceof GatewayRequestError || isUnknownModelError(error)) {
+        const formatted = toGatewayErrorResponse(error);
+        return reply.code(formatted.statusCode).send({
+          error: formatted.code,
+          message: formatted.message,
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(409).send({
+        error: "model_load_failed",
         message:
           error instanceof Error ? error.message : "The model could not be loaded into memory.",
         requestId: request.id,
@@ -367,10 +382,49 @@ async function registerControlApp(
         model: result.model,
       });
     } catch (error) {
-      const statusCode = isUnknownModelError(error) ? 404 : 409;
-      return reply.code(statusCode).send({
-        error: statusCode === 404 ? "model_not_found" : "model_evict_failed",
+      if (error instanceof GatewayRequestError || isUnknownModelError(error)) {
+        const formatted = toGatewayErrorResponse(error);
+        return reply.code(formatted.statusCode).send({
+          error: formatted.code,
+          message: formatted.message,
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(409).send({
+        error: "model_evict_failed",
         message: error instanceof Error ? error.message : "The model could not be evicted.",
+        requestId: request.id,
+      });
+    }
+  });
+
+  app.put("/config/models/*", async (request, reply) => {
+    const rawModelId = (request.params as { "*": string | undefined })["*"];
+    const modelId = rawModelId?.trim();
+    if (!modelId) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: "modelId is required.",
+        requestId: request.id,
+      });
+    }
+
+    try {
+      const parsed = desktopModelConfigUpdateRequestSchema.parse(request.body ?? {});
+      return await runtime.updateModelConfig(modelId, parsed, request.id);
+    } catch (error) {
+      if (error instanceof GatewayRequestError) {
+        return reply.code(error.statusCode).send({
+          error: error.code,
+          message: error.message,
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(400).send({
+        error: "validation_error",
+        message: error instanceof Error ? error.message : "Unable to update model configuration.",
         requestId: request.id,
       });
     }
@@ -500,7 +554,16 @@ async function registerControlApp(
       );
     }
 
-    return reply.code(202).send(await runtime.createDownload(parsed.data, request.id));
+    try {
+      return reply.code(202).send(await runtime.createDownload(parsed.data, request.id));
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
+        requestId: request.id,
+      });
+    }
   });
 
   app.get("/control/engines", async () => ({
@@ -508,12 +571,27 @@ async function registerControlApp(
     data: runtime.listEngines(),
   }));
 
-  app.post("/control/engines", async (_request, reply) =>
-    reply.code(202).send({
-      accepted: true,
-      message: "Mock engine management is wired for Stage 1.",
-    }),
-  );
+  app.post("/control/engines", async (request, reply) => {
+    const parsed = desktopEngineInstallRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid engine install payload.",
+      );
+    }
+
+    try {
+      return reply.code(202).send(await runtime.installEngineBinary(parsed.data, request.id));
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
+        requestId: request.id,
+      });
+    }
+  });
 
   app.post("/control/system/shutdown", async (_request, reply) => {
     const response = {
@@ -583,6 +661,7 @@ export async function startGateway(
   runtime: GatewayRuntime = createRepositoryGatewayRuntime({
     cwd: process.cwd(),
     defaultModelTtlMs: config.defaultModelTtlMs,
+    localModelsDir: config.localModelsDir,
     telemetryIntervalMs: config.telemetryIntervalMs,
   }),
 ): Promise<StartedGateway> {

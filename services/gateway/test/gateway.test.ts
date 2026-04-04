@@ -8,10 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { GatewayConfig } from "../src/config.js";
 import { MockGatewayRuntime } from "../src/runtime/mockRuntime.js";
 import { buildGateway, stopGatewayServices } from "../src/server/app.js";
-import type { GatewayRuntime } from "../src/types.js";
+import { GatewayRequestError, type GatewayRuntime } from "../src/types.js";
 
 interface TestGateway {
-  runtime: MockGatewayRuntime;
+  runtime: GatewayRuntime;
   publicApp: Awaited<ReturnType<typeof buildGateway>>["publicApp"];
   controlApp: Awaited<ReturnType<typeof buildGateway>>["controlApp"];
 }
@@ -25,6 +25,7 @@ function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig
     publicPort: 11434,
     controlHost: "127.0.0.1",
     controlPort: 11435,
+    localModelsDir: path.join(os.tmpdir(), "localhub-gateway-models"),
     publicBearerToken: "public-secret",
     controlBearerToken: "control-secret",
     corsAllowlist: ["localhost", "127.0.0.1"],
@@ -220,6 +221,35 @@ describe("gateway skeleton", () => {
     expect(messages.some((event) => event.type === "REQUEST_TRACE")).toBe(true);
   });
 
+  it("updates cold model configuration through the control plane", async () => {
+    const gateway = await createTestGateway();
+
+    const response = await gateway.controlApp.inject({
+      method: "PUT",
+      url: "/config/models/localhub/tinyllama-1.1b-chat-q4",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        defaultTtlMs: 1_800_000,
+        contextLength: 4096,
+        gpuLayers: 16,
+        pinned: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      model: expect.objectContaining({
+        id: "localhub/tinyllama-1.1b-chat-q4",
+        defaultTtlMs: 1_800_000,
+        contextLength: 4096,
+        gpuLayers: 16,
+        pinned: true,
+      }),
+    });
+  });
+
   it("waits for runtime shutdown before removing discovery state", async () => {
     const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stop-"));
     const discoveryFile = path.join(supportRoot, "gateway-discovery.json");
@@ -361,6 +391,165 @@ describe("gateway skeleton", () => {
     expect(downloadCreateResponse.statusCode).toBe(400);
     expect(downloadCreateResponse.json()).toMatchObject({
       error: "validation_error",
+    });
+  });
+
+  it("maps stage 4 runtime hardening errors on control routes", async () => {
+    const runtime: GatewayRuntime = {
+      start() {},
+      async stop() {},
+      subscribe() {
+        return () => {};
+      },
+      listModels() {
+        return [];
+      },
+      listRuntimeModels() {
+        return [];
+      },
+      async listDesktopModels() {
+        return [];
+      },
+      listDownloads() {
+        return { object: "list", data: [] };
+      },
+      listEngines() {
+        return [];
+      },
+      listChatSessions() {
+        return { object: "list", data: [] };
+      },
+      listChatMessages() {
+        return { object: "list", data: [] };
+      },
+      upsertChatSession() {
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
+      },
+      async runChat() {
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
+      },
+      listRecentApiLogs() {
+        return { object: "list", data: [] };
+      },
+      async searchCatalog() {
+        return { object: "list", data: [], warnings: [] };
+      },
+      async getCatalogModel() {
+        return {
+          object: "model",
+          data: {
+            id: "huggingface:acme/stage4-chat",
+            provider: "huggingface",
+            providerModelId: "acme/stage4-chat",
+            title: "Stage4 Chat",
+            tags: ["gguf"],
+            formats: ["gguf"],
+            repositoryUrl: "https://example.invalid/acme/stage4-chat",
+            variants: [],
+          },
+          warnings: [],
+        };
+      },
+      async createDownload() {
+        throw new GatewayRequestError(
+          "resource_exhausted",
+          "Not enough resident memory budget to load the requested model.",
+          503,
+        );
+      },
+      async pauseDownload() {
+        throw new Error("not implemented");
+      },
+      async resumeDownload() {
+        throw new Error("not implemented");
+      },
+      getHealthSnapshot(plane) {
+        return {
+          status: "ok",
+          plane,
+          uptimeMs: 0,
+          loadedModelCount: 0,
+          activeWebSocketClients: 0,
+        };
+      },
+      async registerLocalModel() {
+        throw new Error("not implemented");
+      },
+      async preloadModel() {
+        throw new GatewayRequestError(
+          "worker_circuit_open",
+          "Model model_qwen25_coder is cooling down after repeated worker failures. Retry in 30s.",
+          503,
+        );
+      },
+      async evictModel() {
+        throw new Error("not implemented");
+      },
+      async createChatCompletion() {
+        throw new Error("not implemented");
+      },
+      async createChatCompletionStream() {
+        throw new Error("not implemented");
+      },
+      async createEmbeddings() {
+        throw new Error("not implemented");
+      },
+      recordRequestTrace() {},
+    };
+    const gateway = await buildGateway({
+      config: createTestConfig(),
+      runtime,
+    });
+
+    await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+    activeGateways.push({
+      runtime,
+      publicApp: gateway.publicApp,
+      controlApp: gateway.controlApp,
+    });
+
+    const preloadResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/models/preload",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        modelId: "model_qwen25_coder",
+      },
+    });
+    const downloadResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        provider: "huggingface",
+        providerModelId: "acme/stage4-chat",
+        artifactId: "stage4-chat-q4",
+        title: "Stage4 Chat",
+        artifactName: "stage4-chat-q4.gguf",
+        downloadUrl: "https://example.invalid/stage4-chat-q4.gguf",
+        metadata: {},
+      },
+    });
+
+    expect(preloadResponse.statusCode).toBe(503);
+    expect(preloadResponse.json()).toMatchObject({
+      error: "worker_circuit_open",
+    });
+    expect(downloadResponse.statusCode).toBe(503);
+    expect(downloadResponse.json()).toMatchObject({
+      error: "resource_exhausted",
     });
   });
 });

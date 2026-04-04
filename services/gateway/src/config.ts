@@ -9,6 +9,7 @@ export interface GatewayConfig {
   publicPort: number;
   controlHost: string;
   controlPort: number;
+  localModelsDir: string;
   publicBearerToken: string | undefined;
   controlBearerToken: string | undefined;
   corsAllowlist: string[];
@@ -68,6 +69,7 @@ export function loadGatewayConfig(options: LoadConfigOptions = {}): GatewayConfi
     publicPort: loaded.value.publicPort,
     controlHost: loaded.value.controlHost,
     controlPort: loaded.value.controlPort,
+    localModelsDir: loaded.value.localModelsDir,
     publicBearerToken,
     controlBearerToken,
     corsAllowlist: [...loaded.value.corsAllowlist],

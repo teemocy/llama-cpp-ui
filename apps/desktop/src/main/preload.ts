@@ -8,9 +8,13 @@ import type {
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
   DesktopEngineList,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelConfigUpdateRequest,
+  DesktopModelConfigUpdateResponse,
   DesktopModelLibrary,
   DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
@@ -23,6 +27,7 @@ import type {
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./channels";
 import type { DesktopSystemPaths } from "./gateway-manager";
+import type { DesktopRuntimeContext } from "./index";
 
 type FileDialogResult = {
   canceled: boolean;
@@ -58,8 +63,22 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.gatewayGetHealth) as Promise<GatewayHealthSnapshot>,
     listEngines: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListEngines) as Promise<DesktopEngineList>,
+    installEngineBinary: (payload: DesktopEngineInstallRequest) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayInstallEngineBinary,
+        payload,
+      ) as Promise<DesktopEngineInstallResponse>,
     registerLocalModel: (payload: DesktopLocalModelImportRequest) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayRegisterLocalModel, payload) as Promise<DesktopLocalModelImportResponse>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayRegisterLocalModel,
+        payload,
+      ) as Promise<DesktopLocalModelImportResponse>,
+    updateModelConfig: (modelId: string, payload: DesktopModelConfigUpdateRequest) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayUpdateModelConfig,
+        modelId,
+        payload,
+      ) as Promise<DesktopModelConfigUpdateResponse>,
     preloadModel: (modelId: string) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayPreloadModel, modelId) as Promise<void>,
     evictModel: (modelId: string) =>
@@ -67,7 +86,10 @@ const api = {
     listChatSessions: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListChatSessions) as Promise<DesktopChatSessionList>,
     listChatMessages: (sessionId: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayListChatMessages, sessionId) as Promise<DesktopChatMessageList>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayListChatMessages,
+        sessionId,
+      ) as Promise<DesktopChatMessageList>,
     upsertChatSession: (payload: DesktopChatSessionUpsertRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayUpsertChatSession, payload) as Promise<ChatSession>,
     runChat: (payload: DesktopChatRunRequest) =>
@@ -88,18 +110,40 @@ const api = {
     listDownloads: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListDownloads) as Promise<DesktopDownloadList>,
     createDownload: (payload: DesktopDownloadCreateRequest) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayCreateDownload, payload) as Promise<DesktopDownloadActionResponse>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayCreateDownload,
+        payload,
+      ) as Promise<DesktopDownloadActionResponse>,
     pauseDownload: (id: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayPauseDownload, id) as Promise<DesktopDownloadActionResponse>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayPauseDownload,
+        id,
+      ) as Promise<DesktopDownloadActionResponse>,
     resumeDownload: (id: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayResumeDownload, id) as Promise<DesktopDownloadActionResponse>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayResumeDownload,
+        id,
+      ) as Promise<DesktopDownloadActionResponse>,
+    restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart) as Promise<void>,
+    shutdown: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayShutdown) as Promise<void>,
     subscribeEvents: (listener: Listener<GatewayEvent>) =>
       subscribe(IPC_CHANNELS.gatewayEvent, listener),
     openModelFileDialog: () =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayOpenModelDialog) as Promise<FileDialogResult>,
+    openEngineBinaryDialog: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayOpenEngineBinaryDialog) as Promise<FileDialogResult>,
   },
   system: {
     getPaths: () => ipcRenderer.invoke(IPC_CHANNELS.systemGetPaths) as Promise<DesktopSystemPaths>,
+    getRuntimeContext: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.systemGetRuntimeContext) as Promise<DesktopRuntimeContext>,
+    pickModelsDirectory: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog) as Promise<FileDialogResult>,
+    updateModelsDirectory: (modelsDir: string) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateModelsDirectory,
+        modelsDir,
+      ) as Promise<DesktopRuntimeContext>,
   },
 };
 
