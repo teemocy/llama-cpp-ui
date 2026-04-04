@@ -41,6 +41,15 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
   );
+  const selectedModel = useMemo(
+    () => models.find((model) => model.id === selectedModelId) ?? null,
+    [models, selectedModelId],
+  );
+  const activeSessionTitle = activeSession?.title ?? "Untitled chat";
+  const activeSessionUpdatedAt = activeSession
+    ? new Date(activeSession.updatedAt).toLocaleString()
+    : "Create a session or send a prompt to start one.";
+  const sessionStatusLabel = activeSession ? "Active session" : "No session selected";
 
   useEffect(() => {
     if (models.length === 0) {
@@ -127,7 +136,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       ...(systemPrompt.trim().length > 0 ? { systemPrompt: systemPrompt.trim() } : {}),
     });
     startTransition(() => {
-      setSessions((current) => sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]));
+      setSessions((current) =>
+        sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
+      );
       setActiveSessionId(next.id);
     });
     return next;
@@ -207,7 +218,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         }),
       );
       setSessions((current) =>
-        sortByUpdatedDesc([result.session, ...current.filter((item) => item.id !== result.session.id)]),
+        sortByUpdatedDesc([
+          result.session,
+          ...current.filter((item) => item.id !== result.session.id),
+        ]),
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to run chat.");
@@ -223,7 +237,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         modelId: selectedModelId || undefined,
         systemPrompt: systemPrompt.trim() || undefined,
       });
-      setSessions((current) => sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]));
+      setSessions((current) =>
+        sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
+      );
       setActiveSessionId(next.id);
       setMessages([]);
     } catch (reason) {
@@ -238,6 +254,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
           <div>
             <span className="section-label">Sessions</span>
             <h3>Persistent history</h3>
+            <p>Keep recent sessions within reach and switch without losing context.</p>
           </div>
           <button className="secondary-button" onClick={() => void createSession()} type="button">
             New session
@@ -253,7 +270,9 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             sessions.map((session) => (
               <button
                 className={
-                  session.id === activeSessionId ? "model-list-item model-list-item-active" : "model-list-item"
+                  session.id === activeSessionId
+                    ? "model-list-item model-list-item-active"
+                    : "model-list-item"
                 }
                 key={session.id}
                 onClick={() => setActiveSessionId(session.id)}
@@ -267,7 +286,21 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         </div>
       </article>
 
-      <article className="wide-card chat-main-panel">
+      <article className="info-card chat-main-panel">
+        <div className="chat-session-banner">
+          <div>
+            <span className="section-label">{sessionStatusLabel}</span>
+            <h3>{activeSessionTitle}</h3>
+            <p>{activeSessionUpdatedAt}</p>
+          </div>
+          <div className="chat-session-meta">
+            <span className="status-pill status-pill-neutral">
+              {selectedModel?.name ?? "No model selected"}
+            </span>
+            <span className="meta-pill meta-pill-muted">{messages.length} messages</span>
+          </div>
+        </div>
+
         <div className="chat-controls">
           <label className="field-stack">
             <span className="section-label">Model</span>
@@ -294,7 +327,11 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             />
           </label>
           <div className="button-row">
-            <button className="secondary-button" onClick={() => void saveSessionConfig()} type="button">
+            <button
+              className="secondary-button"
+              onClick={() => void saveSessionConfig()}
+              type="button"
+            >
               Save prompt
             </button>
             <span className="status-chip">Gateway {shellState.phase}</span>
@@ -326,7 +363,12 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             value={draft}
           />
           <div className="button-row">
-            <button className="primary-button" disabled={busy || draft.trim().length === 0} onClick={() => void sendMessage()} type="button">
+            <button
+              className="primary-button"
+              disabled={busy || draft.trim().length === 0}
+              onClick={() => void sendMessage()}
+              type="button"
+            >
               {busy ? "Generating..." : "Send"}
             </button>
             {error ? <span className="status-pill status-pill-negative">{error}</span> : null}

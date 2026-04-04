@@ -1,22 +1,9 @@
-import type {
-  ApiLogRecord,
-  DesktopShellState,
-  GatewayEvent,
-  GatewayHealthSnapshot,
-} from "@localhub/shared-contracts";
+import type { ApiLogRecord, DesktopShellState } from "@localhub/shared-contracts";
 import { useEffect, useState } from "react";
+import { BACKGROUND_REFRESH_INTERVAL_MS } from "../constants";
 
 type DashboardScreenProps = {
   shellState: DesktopShellState;
-  health: GatewayHealthSnapshot | null;
-  events: GatewayEvent[];
-};
-
-const findNumericMetric = (events: GatewayEvent[], key: string): number | null => {
-  const event = events.find((entry) => entry.type === "METRICS_TICK");
-  const payload = event?.payload as Record<string, unknown> | undefined;
-  const value = payload?.[key];
-  return typeof value === "number" ? value : null;
 };
 
 const formatRate = (value: number | undefined): string => {
@@ -27,27 +14,9 @@ const formatRate = (value: number | undefined): string => {
   return `${value.toFixed(2)} tok/s`;
 };
 
-export function DashboardScreen({ shellState, health, events }: DashboardScreenProps) {
+export function DashboardScreen({ shellState }: DashboardScreenProps) {
   const [apiLogs, setApiLogs] = useState<ApiLogRecord[]>([]);
-  const latestTrace = events.find((event) => event.type === "REQUEST_TRACE");
-  const latestTracePayload = latestTrace?.payload as Record<string, unknown> | undefined;
-  const healthRecord = health as Record<string, unknown> | null;
-  const healthState =
-    typeof healthRecord?.state === "string"
-      ? healthRecord.state
-      : typeof healthRecord?.status === "string"
-        ? healthRecord.status
-        : shellState.phase;
-  const activeWorkers =
-    typeof healthRecord?.activeWorkers === "number"
-      ? healthRecord.activeWorkers
-      : typeof healthRecord?.loadedModelCount === "number"
-        ? healthRecord.loadedModelCount
-        : 0;
-  const runtimeLogs = events.filter((event) => event.type === "LOG_STREAM").slice(0, 10);
   const latestApiLog = apiLogs[0];
-  const residentMemoryBytes = findNumericMetric(events, "residentMemoryBytes");
-  const gpuMemoryBytes = findNumericMetric(events, "gpuMemoryBytes");
 
   useEffect(() => {
     if (shellState.phase !== "connected") {
@@ -65,7 +34,7 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
     void refreshLogs();
     const timer = window.setInterval(() => {
       void refreshLogs();
-    }, 4_000);
+    }, BACKGROUND_REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -73,40 +42,14 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
   }, [shellState.phase]);
 
   return (
-    <section className="screen-grid">
+    <section className="screen-stack">
       <article className="hero-card">
         <span className="section-label">Runtime overview</span>
         <h3>Live gateway observability</h3>
         <p>
-          Track request traces, gateway logs, and token metrics while model runtime requests are in
-          flight.
+          Track completion stats here while Observability handles lifecycle updates, logs, and
+          request traces.
         </p>
-      </article>
-
-      <article className="info-card">
-        <span className="section-label">Gateway phase</span>
-        <strong>{healthState}</strong>
-        <p>{shellState.message}</p>
-      </article>
-
-      <article className="info-card">
-        <span className="section-label">Active workers</span>
-        <strong>{activeWorkers}</strong>
-        <p>The shell is consuming adapted control-plane health snapshots.</p>
-      </article>
-
-      <article className="info-card">
-        <span className="section-label">Resident memory</span>
-        <strong>{residentMemoryBytes !== null ? `${residentMemoryBytes} bytes` : "Pending"}</strong>
-        <p>GPU memory: {gpuMemoryBytes !== null ? `${gpuMemoryBytes} bytes` : "Pending"}</p>
-      </article>
-
-      <article className="info-card">
-        <span className="section-label">Latest trace</span>
-        <strong>
-          {typeof latestTracePayload?.route === "string" ? latestTracePayload.route : "Pending"}
-        </strong>
-        <p>Request traces are already flowing through the same telemetry rail.</p>
       </article>
 
       <article className="wide-card">
@@ -120,9 +63,7 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
             </div>
             <div>
               <dt>TTFT</dt>
-              <dd>
-                {latestApiLog.ttftMs !== undefined ? `${latestApiLog.ttftMs} ms` : "Pending"}
-              </dd>
+              <dd>{latestApiLog.ttftMs !== undefined ? `${latestApiLog.ttftMs} ms` : "Pending"}</dd>
             </div>
             <div>
               <dt>Tokens/s</dt>
@@ -140,23 +81,6 @@ export function DashboardScreen({ shellState, health, events }: DashboardScreenP
         ) : (
           <p>No API logs yet. Run chat requests to populate this panel.</p>
         )}
-      </article>
-
-      <article className="wide-card">
-        <span className="section-label">Live log console</span>
-        <h3>Gateway event stream</h3>
-        <div className="log-console">
-          {runtimeLogs.length === 0 ? (
-            <p>Waiting for runtime log events.</p>
-          ) : (
-            runtimeLogs.map((event) => (
-              <p key={`${event.traceId}-${event.ts}`}>
-                [{new Date(event.ts).toLocaleTimeString()}]{" "}
-                {(event.payload as { message?: string }).message ?? "Gateway log"}
-              </p>
-            ))
-          )}
-        </div>
       </article>
     </section>
   );
