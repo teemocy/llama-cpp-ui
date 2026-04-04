@@ -10,10 +10,15 @@ import type {
   DesktopDownloadActionResponse,
   DesktopDownloadCreateRequest,
   DesktopDownloadList,
+  DesktopEngineInstallRequest,
+  DesktopEngineInstallResponse,
   DesktopEngineRecord,
   DesktopLocalModelImportRequest,
   DesktopLocalModelImportResponse,
+  DesktopModelConfigUpdateRequest,
+  DesktopModelConfigUpdateResponse,
   DesktopModelRecord,
+  DesktopProviderCatalogDetailResponse,
   DesktopProviderSearchResult,
   EmbeddingsRequest,
   EmbeddingsResponse,
@@ -125,11 +130,16 @@ export interface GatewayRuntime {
   listDesktopModels(): MaybePromise<DesktopModelRecord[]>;
   listDownloads(): MaybePromise<DesktopDownloadList>;
   listEngines(): EngineRecord[];
+  installEngineBinary(
+    input: DesktopEngineInstallRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopEngineInstallResponse>;
   listChatSessions(): MaybePromise<DesktopChatSessionList>;
   listChatMessages(sessionId: string): MaybePromise<DesktopChatMessageList>;
   upsertChatSession(
     input: DesktopChatSessionUpsertRequest,
   ): MaybePromise<DesktopChatSessionList["data"][number]>;
+  deleteChatSession(sessionId: string): MaybePromise<boolean>;
   runChat(input: DesktopChatRunRequest, traceId?: string): MaybePromise<DesktopChatRunResponse>;
   listRecentApiLogs(limit?: number): MaybePromise<DesktopApiLogList>;
   searchCatalog(query: string): MaybePromise<DesktopProviderSearchResult>;
@@ -148,6 +158,11 @@ export interface GatewayRuntime {
     input: DesktopLocalModelImportRequest,
     traceId?: string,
   ): MaybePromise<DesktopLocalModelImportResponse>;
+  updateModelConfig(
+    modelId: string,
+    input: DesktopModelConfigUpdateRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopModelConfigUpdateResponse>;
   preloadModel(modelId: string, traceId?: string): MaybePromise<PreloadModelResult>;
   evictModel(modelId: string, traceId?: string): MaybePromise<EvictModelResult>;
   createChatCompletion(

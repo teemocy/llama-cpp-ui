@@ -22,6 +22,7 @@ export const requestRouteSchema = z.enum([
   "GET /control/chat/sessions",
   "GET /control/chat/messages",
   "POST /control/chat/sessions",
+  "DELETE /control/chat/sessions/:id",
   "POST /control/chat/run",
   "GET /control/observability/api-logs",
   "POST /control/system/shutdown",

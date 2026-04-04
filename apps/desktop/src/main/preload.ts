@@ -92,6 +92,8 @@ const api = {
       ) as Promise<DesktopChatMessageList>,
     upsertChatSession: (payload: DesktopChatSessionUpsertRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayUpsertChatSession, payload) as Promise<ChatSession>,
+    deleteChatSession: (sessionId: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.gatewayDeleteChatSession, sessionId) as Promise<void>,
     runChat: (payload: DesktopChatRunRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayRunChat, payload) as Promise<DesktopChatRunResponse>,
     listApiLogs: (limit?: number) =>
@@ -138,7 +140,9 @@ const api = {
     getRuntimeContext: () =>
       ipcRenderer.invoke(IPC_CHANNELS.systemGetRuntimeContext) as Promise<DesktopRuntimeContext>,
     pickModelsDirectory: () =>
-      ipcRenderer.invoke(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog) as Promise<FileDialogResult>,
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayOpenModelsDirectoryDialog,
+      ) as Promise<FileDialogResult>,
     updateModelsDirectory: (modelsDir: string) =>
       ipcRenderer.invoke(
         IPC_CHANNELS.systemUpdateModelsDirectory,

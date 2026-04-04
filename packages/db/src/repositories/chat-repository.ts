@@ -141,6 +141,14 @@ export class ChatRepository {
     );
   }
 
+  deleteSession(sessionId: string): boolean {
+    const result = this.#database
+      .prepare("DELETE FROM chat_sessions WHERE id = ?")
+      .run(sessionId) as { changes?: number | bigint };
+
+    return Number(result.changes ?? 0) > 0;
+  }
+
   insertApiLog(record: ApiLogRecord): number {
     const parsed = apiLogRecordSchema.parse(record);
     const result = this.#database

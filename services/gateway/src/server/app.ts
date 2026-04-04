@@ -459,6 +459,25 @@ async function registerControlApp(
     return runtime.upsertChatSession(parsed.data);
   });
 
+  app.delete("/control/chat/sessions/:sessionId", async (request, reply) => {
+    const rawSessionId = (request.params as { sessionId?: unknown }).sessionId;
+    const sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
+    if (sessionId.length === 0) {
+      return sendValidationError(reply, request.id, "sessionId is required.");
+    }
+
+    const deleted = await runtime.deleteChatSession(sessionId);
+    if (!deleted) {
+      return reply.code(404).send({
+        error: "not_found",
+        message: `Chat session ${sessionId} was not found.`,
+        requestId: request.id,
+      });
+    }
+
+    return reply.code(204).send();
+  });
+
   app.post("/control/chat/run", async (request, reply) => {
     const parsed = desktopChatRunRequestSchema.safeParse(request.body ?? {});
     if (!parsed.success) {

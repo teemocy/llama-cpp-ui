@@ -41,6 +41,7 @@ describe("db foundation", () => {
       .get() as { count: number };
 
     expect(row.count).toBe(3);
+    expect(testDatabase.filePath.endsWith("gateway.sqlite")).toBe(true);
   });
 
   it("persists core operational records", () => {
@@ -86,6 +87,22 @@ describe("db foundation", () => {
     expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(1);
     expect(apiLogId).toBeGreaterThan(0);
     expect(chat.listRecentApiLogs()).toHaveLength(1);
+  });
+
+  it("deletes chat sessions and cascades their messages", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const models = new ModelsRepository(testDatabase.database);
+    const chat = new ChatRepository(testDatabase.database);
+
+    models.save(fixtureModelArtifact, fixtureModelProfile);
+    chat.upsertSession(fixtureChatSession);
+    chat.appendMessage(fixtureChatMessage);
+
+    expect(chat.deleteSession(fixtureChatSession.id)).toBe(true);
+    expect(chat.listSessions()).toHaveLength(0);
+    expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(0);
   });
 
   it("maps request traces into persisted api logs", () => {

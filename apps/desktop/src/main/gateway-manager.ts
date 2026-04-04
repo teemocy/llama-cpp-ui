@@ -17,6 +17,8 @@ import {
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
+  type DesktopEngineInstallRequest,
+  type DesktopEngineInstallResponse,
   type DesktopEngineList,
   type DesktopLocalModelImportRequest,
   type DesktopLocalModelImportResponse,
@@ -39,6 +41,7 @@ import {
   desktopChatSessionListSchema,
   desktopDownloadActionResponseSchema,
   desktopDownloadListSchema,
+  desktopEngineInstallResponseSchema,
   desktopEngineListSchema,
   desktopLocalModelImportResponseSchema,
   desktopModelConfigUpdateResponseSchema,
@@ -97,6 +100,7 @@ export type DesktopRuntimeEnvironment = "development" | "packaged" | "test";
 const DEFAULT_GATEWAY_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
 const DEFAULT_GATEWAY_TERM_EXIT_TIMEOUT_MS = 2_000;
 const DEFAULT_GATEWAY_KILL_EXIT_TIMEOUT_MS = 1_000;
+const DEFAULT_GATEWAY_DISCOVERY_TIMEOUT_MS = 5 * 60_000;
 
 const resolveGatewayEntrypoint = (workspaceRoot: string): string => {
   const candidatePaths = [
@@ -308,6 +312,7 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
+    case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
@@ -319,6 +324,12 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(pathName)) {
         return "PUT /config/models/:id";
+      }
+      if (
+        method.toUpperCase() === "DELETE" &&
+        /^\/control\/chat\/sessions\/[^/]+$/.test(pathName)
+      ) {
+        return "DELETE /control/chat/sessions/:id";
       }
       return null;
   }
@@ -425,7 +436,7 @@ export class GatewayManager extends EventEmitter {
       this.updateState({
         phase: "waiting_for_discovery",
         progress: 35,
-        message: "Waiting for gateway discovery file.",
+        message: "Waiting for gateway discovery file. Large local model scans can take a while.",
       });
     });
 
@@ -451,7 +462,7 @@ export class GatewayManager extends EventEmitter {
     });
 
     try {
-      const discovery = await this.waitForDiscovery();
+      const discovery = await this.waitForDiscovery(this.child);
       this.discovery = discovery;
       this.updateState({
         phase: "connecting",
@@ -532,6 +543,24 @@ export class GatewayManager extends EventEmitter {
     );
 
     return desktopEngineListSchema.parse(payload);
+  }
+
+  async installEngineBinary(
+    payload: DesktopEngineInstallRequest,
+  ): Promise<DesktopEngineInstallResponse> {
+    const discovery = this.requireDiscovery();
+    const json = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/engines`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify(payload),
+      }),
+      "Unable to install the selected llama.cpp binary.",
+    );
+
+    return desktopEngineInstallResponseSchema.parse(json);
   }
 
   async registerLocalModel(
@@ -639,6 +668,18 @@ export class GatewayManager extends EventEmitter {
       "Unable to save chat session.",
     );
     return chatSessionSchema.parse(payload);
+  }
+
+  async deleteChatSession(sessionId: string): Promise<void> {
+    const discovery = this.requireDiscovery();
+    const encodedId = encodeURIComponent(sessionId);
+    await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/chat/sessions/${encodedId}`, {
+        method: "DELETE",
+        headers: this.createControlHeaders(),
+      }),
+      "Unable to delete chat session.",
+    );
   }
 
   async runChat(input: DesktopChatRunRequest): Promise<DesktopChatRunResponse> {
@@ -897,7 +938,10 @@ export class GatewayManager extends EventEmitter {
     });
   }
 
-  private async waitForDiscovery(timeoutMs = 20_000): Promise<GatewayDiscoveryFile> {
+  private async waitForDiscovery(
+    child: Pick<ChildProcess, "exitCode" | "signalCode">,
+    timeoutMs = DEFAULT_GATEWAY_DISCOVERY_TIMEOUT_MS,
+  ): Promise<GatewayDiscoveryFile> {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -906,10 +950,22 @@ export class GatewayManager extends EventEmitter {
         return discovery;
       }
 
+      if (child.exitCode !== null || child.signalCode !== null) {
+        const exitLabel =
+          child.exitCode !== null
+            ? `code ${child.exitCode}`
+            : child.signalCode !== null
+              ? `signal ${child.signalCode}`
+              : "unknown status";
+        throw new Error(`Gateway process exited before writing the discovery file (${exitLabel}).`);
+      }
+
       await sleep(250);
     }
 
-    throw new Error("Timed out waiting for gateway discovery file.");
+    throw new Error(
+      "Timed out waiting for gateway discovery file. Large local model scans can delay startup.",
+    );
   }
 
   private async connectTelemetry(discovery: GatewayDiscoveryFile): Promise<void> {

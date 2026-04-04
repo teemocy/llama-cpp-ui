@@ -906,6 +906,7 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
+    case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
@@ -918,6 +919,13 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(pathName)) {
         return "PUT /config/models/:id";
+      }
+
+      if (
+        method.toUpperCase() === "DELETE" &&
+        /^\/control\/chat\/sessions\/[^/]+$/.test(pathName)
+      ) {
+        return "DELETE /control/chat/sessions/:id";
       }
 
       return null;
@@ -1226,6 +1234,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     return session;
   }
 
+  deleteChatSession(sessionId: string): boolean {
+    return this.#chatRepository.deleteSession(sessionId);
+  }
+
   async runChat(input: DesktopChatRunRequest, traceId?: string): Promise<DesktopChatRunResponse> {
     const now = nowIso();
     const session = this.upsertChatSession({
@@ -1409,16 +1421,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       );
 
     if (!stored) {
-      throw new Error(`Installed llama.cpp version ${installResult.versionTag} could not be recorded.`);
+      throw new Error(
+        `Installed llama.cpp version ${installResult.versionTag} could not be recorded.`,
+      );
     }
 
-    this.publishLog(
-      "info",
-      installResult.notes.join(" "),
-      normalizedTraceId,
-      undefined,
-      "desktop",
-    );
+    this.publishLog("info", installResult.notes.join(" "), normalizedTraceId, undefined, "desktop");
 
     return desktopEngineInstallResponseSchema.parse({
       accepted: true,

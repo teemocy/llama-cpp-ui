@@ -34,8 +34,10 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>(models[0]?.id ?? "");
   const [systemPrompt, setSystemPrompt] = useState("");
+  const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [sessionActionBusy, setSessionActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
@@ -75,7 +77,13 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
         const sorted = sortByUpdatedDesc(response.data);
         setSessions(sorted);
-        setActiveSessionId((current) => current ?? sorted[0]?.id ?? null);
+        setActiveSessionId((current) => {
+          if (current && sorted.some((session) => session.id === current)) {
+            return current;
+          }
+
+          return sorted[0]?.id ?? null;
+        });
       } catch (reason) {
         if (!cancelled) {
           setError(reason instanceof Error ? reason.message : "Unable to load sessions.");
@@ -120,6 +128,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   useEffect(() => {
     if (!activeSession) {
       setSystemPrompt("");
+      setSessionTitleDraft("");
       return;
     }
 
@@ -127,13 +136,15 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       setSelectedModelId(activeSession.modelId);
     }
     setSystemPrompt(activeSession.systemPrompt ?? "");
+    setSessionTitleDraft(activeSession.title ?? "");
   }, [activeSession]);
 
   const ensureSession = async (): Promise<ChatSession> => {
     const next = await window.desktopApi.gateway.upsertChatSession({
       ...(activeSessionId ? { id: activeSessionId } : {}),
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
-      ...(systemPrompt.trim().length > 0 ? { systemPrompt: systemPrompt.trim() } : {}),
+      title: sessionTitleDraft.trim(),
+      systemPrompt: systemPrompt.trim(),
     });
     startTransition(() => {
       setSessions((current) =>
@@ -145,16 +156,30 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   };
 
   const saveSessionConfig = async () => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    setSessionActionBusy(true);
+
     try {
       setError(null);
       await ensureSession();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to save session settings.");
+    } finally {
+      setSessionActionBusy(false);
     }
   };
 
   const sendMessage = async () => {
-    if (busy || shellState.phase !== "connected" || draft.trim().length === 0 || !selectedModelId) {
+    if (
+      busy ||
+      sessionActionBusy ||
+      shellState.phase !== "connected" ||
+      draft.trim().length === 0 ||
+      !selectedModelId
+    ) {
       return;
     }
 
@@ -231,11 +256,18 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   };
 
   const createSession = async () => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    setSessionActionBusy(true);
+
     try {
       setError(null);
       const next = await window.desktopApi.gateway.upsertChatSession({
         modelId: selectedModelId || undefined,
-        systemPrompt: systemPrompt.trim() || undefined,
+        title: sessionTitleDraft.trim(),
+        systemPrompt: systemPrompt.trim(),
       });
       setSessions((current) =>
         sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
@@ -244,6 +276,48 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
       setMessages([]);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to create session.");
+    } finally {
+      setSessionActionBusy(false);
+    }
+  };
+
+  const deleteSession = async () => {
+    if (!activeSessionId || sessionActionBusy) {
+      return;
+    }
+
+    const sessionLabel = sessionTitleDraft.trim() || activeSessionTitle;
+    if (
+      !window.confirm(
+        `Delete "${sessionLabel}"? This will remove the session and all of its messages.`,
+      )
+    ) {
+      return;
+    }
+
+    setSessionActionBusy(true);
+
+    try {
+      setError(null);
+      await window.desktopApi.gateway.deleteChatSession(activeSessionId);
+      const response = await window.desktopApi.gateway.listChatSessions();
+
+      startTransition(() => {
+        const sorted = sortByUpdatedDesc(response.data);
+        setSessions(sorted);
+        setActiveSessionId((current) => {
+          if (current && sorted.some((session) => session.id === current)) {
+            return current;
+          }
+
+          return sorted[0]?.id ?? null;
+        });
+        setMessages([]);
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to delete session.");
+    } finally {
+      setSessionActionBusy(false);
     }
   };
 
@@ -256,7 +330,12 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             <h3>Persistent history</h3>
             <p>Keep recent sessions within reach and switch without losing context.</p>
           </div>
-          <button className="secondary-button" onClick={() => void createSession()} type="button">
+          <button
+            className="secondary-button"
+            disabled={shellState.phase !== "connected" || busy || sessionActionBusy}
+            onClick={() => void createSession()}
+            type="button"
+          >
             New session
           </button>
         </div>
@@ -274,6 +353,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
                     ? "model-list-item model-list-item-active"
                     : "model-list-item"
                 }
+                disabled={shellState.phase !== "connected" || busy || sessionActionBusy}
                 key={session.id}
                 onClick={() => setActiveSessionId(session.id)}
                 type="button"
@@ -288,9 +368,14 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
       <article className="info-card chat-main-panel">
         <div className="chat-session-banner">
-          <div>
+          <div className="chat-session-copy">
             <span className="section-label">{sessionStatusLabel}</span>
-            <h3>{activeSessionTitle}</h3>
+            <input
+              className="text-input chat-session-title-input"
+              onChange={(event) => setSessionTitleDraft(event.target.value)}
+              placeholder={activeSessionTitle}
+              value={sessionTitleDraft}
+            />
             <p>{activeSessionUpdatedAt}</p>
           </div>
           <div className="chat-session-meta">
@@ -299,6 +384,29 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             </span>
             <span className="meta-pill meta-pill-muted">{messages.length} messages</span>
           </div>
+        </div>
+
+        <div className="chat-session-actions">
+          <button
+            className="secondary-button"
+            disabled={
+              shellState.phase !== "connected" || !activeSession || busy || sessionActionBusy
+            }
+            onClick={() => void saveSessionConfig()}
+            type="button"
+          >
+            Save session
+          </button>
+          <button
+            className="secondary-button danger-button"
+            disabled={
+              shellState.phase !== "connected" || !activeSession || busy || sessionActionBusy
+            }
+            onClick={() => void deleteSession()}
+            type="button"
+          >
+            Delete session
+          </button>
         </div>
 
         <div className="chat-controls">
@@ -327,13 +435,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             />
           </label>
           <div className="button-row">
-            <button
-              className="secondary-button"
-              onClick={() => void saveSessionConfig()}
-              type="button"
-            >
-              Save prompt
-            </button>
             <span className="status-chip">Gateway {shellState.phase}</span>
           </div>
         </div>
@@ -365,7 +466,12 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
           <div className="button-row">
             <button
               className="primary-button"
-              disabled={busy || draft.trim().length === 0}
+              disabled={
+                shellState.phase !== "connected" ||
+                busy ||
+                sessionActionBusy ||
+                draft.trim().length === 0
+              }
               onClick={() => void sendMessage()}
               type="button"
             >

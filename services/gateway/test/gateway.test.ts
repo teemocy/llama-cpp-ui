@@ -292,6 +292,9 @@ describe("gateway skeleton", () => {
       async registerLocalModel() {
         throw new Error("not implemented");
       },
+      deleteChatSession() {
+        return false;
+      },
       async preloadModel() {
         throw new Error("not implemented");
       },
@@ -394,6 +397,48 @@ describe("gateway skeleton", () => {
     });
   });
 
+  it("deletes chat sessions through the control plane", async () => {
+    const gateway = await createTestGateway();
+
+    const createResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/chat/sessions",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        title: "Session to delete",
+        modelId: "localhub/tinyllama-1.1b-chat-q4",
+        systemPrompt: "Be concise.",
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+
+    const createdSession = createResponse.json() as { id: string };
+    const deleteResponse = await gateway.controlApp.inject({
+      method: "DELETE",
+      url: `/control/chat/sessions/${createdSession.id}`,
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+    });
+    const sessionsResponse = await gateway.controlApp.inject({
+      method: "GET",
+      url: "/control/chat/sessions",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+    });
+
+    expect(deleteResponse.statusCode).toBe(204);
+    expect(sessionsResponse.statusCode).toBe(200);
+    expect(sessionsResponse.json()).toMatchObject({
+      object: "list",
+      data: [],
+    });
+  });
+
   it("maps stage 4 runtime hardening errors on control routes", async () => {
     const runtime: GatewayRuntime = {
       start() {},
@@ -482,6 +527,13 @@ describe("gateway skeleton", () => {
       },
       async registerLocalModel() {
         throw new Error("not implemented");
+      },
+      async deleteChatSession() {
+        throw new GatewayRequestError(
+          "gateway_stopping",
+          "The gateway is shutting down and is not accepting new work.",
+          503,
+        );
       },
       async preloadModel() {
         throw new GatewayRequestError(

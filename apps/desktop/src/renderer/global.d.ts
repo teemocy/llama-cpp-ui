@@ -85,6 +85,7 @@ type DesktopApi = {
     listChatSessions(): Promise<DesktopChatSessionList>;
     listChatMessages(sessionId: string): Promise<DesktopChatMessageList>;
     upsertChatSession(payload: DesktopChatSessionUpsertRequest): Promise<ChatSession>;
+    deleteChatSession(sessionId: string): Promise<void>;
     runChat(payload: DesktopChatRunRequest): Promise<DesktopChatRunResponse>;
     listApiLogs(limit?: number): Promise<DesktopApiLogList>;
     searchCatalog(query: string): Promise<DesktopProviderSearchResult>;

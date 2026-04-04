@@ -16,7 +16,11 @@ import {
   type DesktopDownloadActionResponse,
   type DesktopDownloadCreateRequest,
   type DesktopDownloadList,
+  type DesktopEngineInstallRequest,
+  type DesktopEngineInstallResponse,
   type DesktopLocalModelImportResponse,
+  type DesktopModelConfigUpdateRequest,
+  type DesktopModelConfigUpdateResponse,
   type DesktopModelRecord,
   type DesktopModelRuntimeState,
   type DesktopProviderCatalogDetailResponse,
@@ -99,6 +103,11 @@ function createTraceId(traceId?: string): string {
 function countTokens(value: string): number {
   const trimmed = value.trim();
   return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
+}
+
+function createSessionTitle(message: string): string {
+  const trimmed = message.replace(/\s+/g, " ").trim();
+  return trimmed.length <= 56 ? trimmed : `${trimmed.slice(0, 53).trimEnd()}...`;
 }
 
 function prettifyModelName(modelId: string): string {
@@ -195,6 +204,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "GET /control/chat/sessions":
     case "GET /control/chat/messages":
     case "POST /control/chat/sessions":
+    case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
@@ -207,6 +217,10 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     default:
       if (method.toUpperCase() === "PUT" && /^\/config\/models\/[^/]+$/.test(path)) {
         return "PUT /config/models/:id";
+      }
+
+      if (method.toUpperCase() === "DELETE" && /^\/control\/chat\/sessions\/[^/]+$/.test(path)) {
+        return "DELETE /control/chat/sessions/:id";
       }
 
       return null;
@@ -337,14 +351,16 @@ export class MockGatewayRuntime {
   listChatSessions(): DesktopChatSessionList {
     return {
       object: "list",
-      data: [],
+      data: Array.from(this.#chatSessions.values())
+        .map((session) => structuredClone(session))
+        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
     };
   }
 
-  listChatMessages(_sessionId: string): DesktopChatMessageList {
+  listChatMessages(sessionId: string): DesktopChatMessageList {
     return {
       object: "list",
-      data: [],
+      data: structuredClone(this.#chatMessages.get(sessionId) ?? []),
     };
   }
 
@@ -352,22 +368,40 @@ export class MockGatewayRuntime {
     input: DesktopChatSessionUpsertRequest,
   ): DesktopChatSessionList["data"][number] {
     const now = new Date().toISOString();
-    return {
-      id: input.id ?? `session_${Date.now()}`,
-      ...(input.title ? { title: input.title } : {}),
-      ...(input.modelId ? { modelId: input.modelId } : {}),
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
-      metadata: {},
-      createdAt: now,
+    const existing = input.id ? this.#chatSessions.get(input.id) : undefined;
+    const session: ChatSession = {
+      id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
+      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...((input.modelId ?? existing?.modelId)
+        ? { modelId: input.modelId ?? existing?.modelId }
+        : {}),
+      ...((input.systemPrompt ?? existing?.systemPrompt)
+        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
+        : {}),
+      metadata: existing?.metadata ?? {},
+      createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
+
+    this.#chatSessions.set(session.id, structuredClone(session));
+    if (!this.#chatMessages.has(session.id)) {
+      this.#chatMessages.set(session.id, []);
+    }
+
+    return structuredClone(session);
+  }
+
+  deleteChatSession(sessionId: string): boolean {
+    const deleted = this.#chatSessions.delete(sessionId);
+    this.#chatMessages.delete(sessionId);
+
+    return deleted;
   }
 
   runChat(input: DesktopChatRunRequest, traceId?: string): DesktopChatRunResponse {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      title: input.message.slice(0, 80),
       ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
@@ -379,27 +413,42 @@ export class MockGatewayRuntime {
       },
       { traceId: createTraceId(traceId) },
     );
+    const userMessage: ChatMessage = {
+      id: `message_${Date.now()}`,
+      sessionId: session.id,
+      role: "user",
+      content: input.message,
+      toolCalls: [],
+      metadata: {},
+      createdAt: now,
+    };
+    const assistantMessage: ChatMessage = {
+      id: `message_${Date.now() + 1}`,
+      sessionId: session.id,
+      role: "assistant",
+      content: response.choices[0]?.message.content as string | null,
+      toolCalls: response.choices[0]?.message.tool_calls ?? [],
+      metadata: {},
+      createdAt: now,
+    };
+
+    this.#chatMessages.set(session.id, [
+      ...(this.#chatMessages.get(session.id) ?? []),
+      userMessage,
+      assistantMessage,
+    ]);
+
+    const updatedSession = this.upsertChatSession({
+      id: session.id,
+      modelId: input.model,
+      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.title ? { title: session.title } : { title: createSessionTitle(input.message) }),
+    });
 
     return {
-      session,
-      userMessage: {
-        id: `message_${Date.now()}`,
-        sessionId: session.id,
-        role: "user",
-        content: input.message,
-        toolCalls: [],
-        metadata: {},
-        createdAt: now,
-      },
-      assistantMessage: {
-        id: `message_${Date.now() + 1}`,
-        sessionId: session.id,
-        role: "assistant",
-        content: response.choices[0]?.message.content as string | null,
-        toolCalls: response.choices[0]?.message.tool_calls ?? [],
-        metadata: {},
-        createdAt: now,
-      },
+      session: updatedSession,
+      userMessage,
+      assistantMessage,
       response,
     };
   }
@@ -537,6 +586,73 @@ export class MockGatewayRuntime {
     return structuredClone(this.#engines);
   }
 
+  installEngineBinary(
+    input: DesktopEngineInstallRequest,
+    _traceId?: string,
+  ): DesktopEngineInstallResponse {
+    const versionTag =
+      input.action === "download-latest-metal"
+        ? "mock-metal-latest"
+        : input.action === "import-local-binary"
+          ? `mock-local-${slugifyFileName(input.filePath) || "binary"}`
+          : input.versionTag;
+    const existingRecord = this.#engines.find((record) => record.version === versionTag);
+    const binaryName =
+      input.action === "download-latest-metal"
+        ? "llama-server"
+        : input.action === "import-local-binary"
+          ? path.basename(input.filePath)
+          : existingRecord?.binaryPath
+            ? path.basename(existingRecord.binaryPath)
+            : "llama-server";
+    const binaryPath =
+      input.action === "download-latest-metal"
+        ? `/mock/support/engines/llama.cpp/versions/${versionTag}/llama-server`
+        : input.action === "import-local-binary"
+          ? `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`
+          : (existingRecord?.binaryPath ??
+            `/mock/support/engines/llama.cpp/versions/${versionTag}/${binaryName}`);
+    const engine: EngineRecord = {
+      id: `llama.cpp:${versionTag}`,
+      engineType: "llama.cpp",
+      version: versionTag,
+      channel: "stable",
+      installed: true,
+      active: true,
+      binaryPath,
+      compatibilityNotes:
+        input.action === "download-latest-metal"
+          ? "Mock packaged Metal binary install."
+          : input.action === "import-local-binary"
+            ? `Mock local binary import from ${input.filePath}.`
+            : `Mock activated installed version ${input.versionTag}.`,
+      installedAt: new Date().toISOString(),
+    };
+
+    const existingIndex = this.#engines.findIndex((record) => record.version === versionTag);
+    if (existingIndex >= 0) {
+      this.#engines.splice(existingIndex, 1, engine);
+    } else {
+      this.#engines.unshift(engine);
+    }
+
+    for (const record of this.#engines) {
+      record.active = record.version === versionTag;
+    }
+
+    return {
+      accepted: true,
+      engine: structuredClone(engine),
+      notes: [
+        input.action === "download-latest-metal"
+          ? "Mock downloaded a packaged Metal llama.cpp binary."
+          : input.action === "import-local-binary"
+            ? `Mock imported local llama.cpp binary from ${input.filePath}.`
+            : `Mock activated installed llama.cpp version ${input.versionTag}.`,
+      ],
+    };
+  }
+
   getHealthSnapshot(plane: GatewayPlane): ControlHealthSnapshot {
     return {
       status: "ok",
@@ -593,6 +709,39 @@ export class MockGatewayRuntime {
     return {
       created,
       model: this.getDesktopModelRecord(modelId),
+    };
+  }
+
+  updateModelConfig(
+    modelId: string,
+    input: DesktopModelConfigUpdateRequest,
+    _traceId?: string,
+  ): DesktopModelConfigUpdateResponse {
+    const existing = this.#modelDetails.get(modelId);
+    if (!existing) {
+      throw new Error(`Unknown model: ${modelId}`);
+    }
+    if (existing.loaded) {
+      throw new GatewayRequestError(
+        "model_config_requires_cold_state",
+        "Evict the model from memory before changing advanced runtime settings.",
+        409,
+      );
+    }
+
+    const updated: DesktopModelRecord = {
+      ...existing,
+      ...(input.displayName ? { displayName: input.displayName } : {}),
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
+      ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+      ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#modelDetails.set(modelId, updated);
+
+    return {
+      model: structuredClone(updated),
     };
   }
 
@@ -889,6 +1038,7 @@ export class MockGatewayRuntime {
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
+      gpuLayers: existing?.gpuLayers ?? 20,
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

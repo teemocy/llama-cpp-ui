@@ -12,6 +12,7 @@ import {
   nativeImage,
 } from "electron";
 import {
+  ensureAppPaths,
   loadDesktopConfig,
   loadGatewayConfig as loadPlatformGatewayConfig,
   resolveAppPaths,
@@ -50,10 +51,12 @@ let quitting = false;
 const workspaceRoot = path.resolve(__dirname, "..", "..", "..");
 const runtimeEnvironment = resolveDesktopRuntimeEnvironment(workspaceRoot);
 const gatewayManager = new GatewayManager();
-const appPaths = resolveAppPaths({
-  cwd: workspaceRoot,
-  environment: runtimeEnvironment,
-});
+const appPaths = ensureAppPaths(
+  resolveAppPaths({
+    cwd: workspaceRoot,
+    environment: runtimeEnvironment,
+  }),
+);
 const desktopConfig = loadDesktopConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
@@ -241,6 +244,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayUpsertChatSession, (_event, payload) =>
     gatewayManager.upsertChatSession(payload),
   );
+  ipcMain.handle(IPC_CHANNELS.gatewayDeleteChatSession, (_event, sessionId: string) =>
+    gatewayManager.deleteChatSession(sessionId),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayRunChat, (_event, payload) => gatewayManager.runChat(payload));
   ipcMain.handle(IPC_CHANNELS.gatewayListApiLogs, (_event, limit?: number) =>
     gatewayManager.listApiLogs(limit),
@@ -266,8 +272,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayRestart, () => gatewayManager.restart());
   ipcMain.handle(IPC_CHANNELS.gatewayShutdown, () => gatewayManager.shutdown());
   ipcMain.handle(IPC_CHANNELS.systemGetPaths, () => gatewayManager.paths);
-  ipcMain.handle(IPC_CHANNELS.systemGetRuntimeContext, (): DesktopRuntimeContext =>
-    buildRuntimeContext(),
+  ipcMain.handle(
+    IPC_CHANNELS.systemGetRuntimeContext,
+    (): DesktopRuntimeContext => buildRuntimeContext(),
   );
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog, async () => {
     const options = {
@@ -283,6 +290,7 @@ const registerIpcHandlers = (): void => {
     async (_event, rawModelsDir: string): Promise<DesktopRuntimeContext> => {
       const modelsDir = normalizeLocalModelsDir(rawModelsDir);
       mkdirSync(modelsDir, { recursive: true });
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
       writeConfigFile(sharedGatewayConfig.filePath, {
         ...sharedGatewayConfig.value,
         localModelsDir: modelsDir,
