@@ -15,6 +15,7 @@ import {
   Menu,
   Tray,
   app,
+  clipboard,
   dialog,
   ipcMain,
   nativeImage,
@@ -300,6 +301,9 @@ const registerIpcHandlers = (): void => {
     IPC_CHANNELS.systemGetRuntimeContext,
     (): DesktopRuntimeContext => buildRuntimeContext(),
   );
+  ipcMain.handle(IPC_CHANNELS.systemCopyPath, (_event, filePath: string) => {
+    clipboard.writeText(filePath);
+  });
   ipcMain.handle(IPC_CHANNELS.gatewayOpenModelsDirectoryDialog, async () => {
     const options = {
       title: "Choose a local models directory",

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -6,6 +7,7 @@ import {
   buildControlHeaders,
   resolveControlBearerToken,
   resolveGatewayLaunchCommand,
+  resolveSessionLogFilePath,
   waitForChildExit,
 } from "./gateway-manager";
 
@@ -85,6 +87,16 @@ describe("gateway manager auth helpers", () => {
       command: "/Applications/Electron.app/Contents/MacOS/Electron",
       useElectronRunAsNode: true,
     });
+  });
+
+  it("resolves a launch-scoped session log file path", () => {
+    const logsDir = path.join("/tmp", "localhub-logs");
+    const sessionLogPath = resolveSessionLogFilePath(logsDir, new Date("2026-04-03T08:15:00.000Z"));
+
+    expect(
+      sessionLogPath.startsWith(path.join(logsDir, "desktop-session-2026-04-03T08-15-00.000Z-")),
+    ).toBe(true);
+    expect(sessionLogPath.endsWith(".jsonl")).toBe(true);
   });
 
   it("waits for a child process to exit within the graceful timeout", async () => {

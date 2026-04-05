@@ -114,6 +114,7 @@ type DesktopApi = {
   system: {
     getPaths(): Promise<DesktopSystemPaths>;
     getRuntimeContext(): Promise<DesktopRuntimeContext>;
+    copyPath(filePath: string): Promise<void>;
     revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;

@@ -351,6 +351,10 @@ export function App() {
     await window.desktopApi.system.revealPath(filePath);
   };
 
+  const copySessionLogFilePath = async (filePath: string): Promise<void> => {
+    await window.desktopApi.system.copyPath(filePath);
+  };
+
   const restartGateway = async (): Promise<void> => {
     setRecoveryBusy("restart");
     try {
@@ -488,6 +492,7 @@ export function App() {
                   events={events}
                   health={health}
                   paths={paths}
+                  onCopySessionLogFile={copySessionLogFilePath}
                   onRevealSessionLogFile={revealSessionLogFile}
                   shellState={shellState}
                 />

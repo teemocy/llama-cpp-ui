@@ -791,6 +791,29 @@ select {
   word-break: break-word;
 }
 
+.session-log-toast {
+  margin: 10px 0 0;
+  min-height: 1.1em;
+  color: var(--muted);
+  font-size: 0.82rem;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.session-log-toast-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.session-log-toast-success {
+  color: var(--success);
+}
+
+.session-log-toast-error {
+  color: #b2432c;
+}
+
 .capability-override-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
