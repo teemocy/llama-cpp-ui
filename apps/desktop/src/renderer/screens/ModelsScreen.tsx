@@ -118,6 +118,9 @@ const describeModel = (model: DesktopModelRecord): string => {
   return facets.length > 0 ? facets.join(" • ") : "Registered local model.";
 };
 
+const modelMetadataHint =
+  "For exact parameter count and tokenizer details, include a companion model metadata file or manifest with explicit values. GGUF-only detection can be incomplete or wrong for those fields.";
+
 const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
   switch (state) {
     case "ready":
@@ -300,6 +303,18 @@ export function ModelsScreen({
     selectedModel.loaded &&
     selectedModel.state !== "evicting" &&
     pendingActionModelId !== selectedModel.id;
+  const detailModelAction: "preload" | "evict" = selectedModel?.loaded ? "evict" : "preload";
+  const detailModelActionDisabled = detailModelAction === "evict" ? !canEvict : !canPreload;
+  const detailModelActionLabel =
+    detailModelAction === "evict"
+      ? pendingActionModelId === selectedModel?.id && selectedModel?.loaded
+        ? "Evicting..."
+        : "Evict from memory"
+      : pendingActionModelId === selectedModel?.id && selectedModel?.state !== "ready"
+        ? "Loading..."
+        : selectedModel?.state === "error"
+          ? "Retry preload"
+          : "Preload to memory";
   const canSaveConfig =
     connected &&
     !!selectedModel &&
@@ -723,7 +738,7 @@ export function ModelsScreen({
             <>
               <div className="panel-header">
                 <div>
-                  <span className="section-label">Model detail preview</span>
+                  <span className="section-label">Model popup</span>
                   <h3>{selectedModel.displayName}</h3>
                 </div>
                 <button className="primary-button" onClick={() => openModelDetail(selectedModel.id)} type="button">
@@ -732,41 +747,9 @@ export function ModelsScreen({
               </div>
 
               <p>
-                Inspect metadata, runtime state, and config overrides in a focused popup instead of
-                keeping the full detail panel inline.
+                The popup contains the full model detail view, runtime controls, and config
+                overrides in separate tabs.
               </p>
-
-              <div className="detail-preview-grid">
-                <div>
-                  <span className="section-label">Runtime role</span>
-                  <strong>{humanize(selectedModel.role)}</strong>
-                </div>
-                <div>
-                  <span className="section-label">Context length</span>
-                  <strong>{selectedModel.contextLength ?? "Unknown"}</strong>
-                </div>
-                <div>
-                  <span className="section-label">Warm TTL</span>
-                  <strong>{formatTtl(selectedModel.defaultTtlMs)}</strong>
-                </div>
-                <div>
-                  <span className="section-label">Override state</span>
-                  <strong>{hasCapabilityOverrides ? "Customized" : "Defaults"}</strong>
-                </div>
-              </div>
-
-              <div className="detail-preview-actions">
-                <button className="secondary-button" onClick={() => openModelDetail(selectedModel.id)} type="button">
-                  View model details
-                </button>
-                <button
-                  className="secondary-button"
-                  onClick={() => openModelDetail(selectedModel.id, "config")}
-                  type="button"
-                >
-                  View config overrides
-                </button>
-              </div>
             </>
           ) : (
             <div className="empty-panel">
@@ -829,25 +812,11 @@ export function ModelsScreen({
                 <div className="detail-actions">
                   <button
                     className="primary-button"
-                    disabled={!canPreload}
-                    onClick={() => void runModelAction("preload")}
+                    disabled={detailModelActionDisabled}
+                    onClick={() => void runModelAction(detailModelAction)}
                     type="button"
                   >
-                    {pendingActionModelId === selectedModel.id && selectedModel.state !== "ready"
-                      ? "Loading..."
-                      : selectedModel.state === "error"
-                        ? "Retry preload"
-                        : "Preload to memory"}
-                  </button>
-                  <button
-                    className="secondary-button"
-                    disabled={!canEvict}
-                    onClick={() => void runModelAction("evict")}
-                    type="button"
-                  >
-                    {pendingActionModelId === selectedModel.id && selectedModel.loaded
-                      ? "Evicting..."
-                      : "Evict from memory"}
+                    {detailModelActionLabel}
                   </button>
                 </div>
 
@@ -913,6 +882,11 @@ export function ModelsScreen({
                   </div>
                 </dl>
 
+                <div className="detail-meta-note">
+                  <strong>Metadata hint</strong>
+                  <p>{modelMetadataHint}</p>
+                </div>
+
                 <div className="pill-row">
                   {selectedModel.tags.length > 0 ? selectedModel.tags.map((tag) => (
                     <span className="meta-pill" key={tag}>
@@ -925,8 +899,8 @@ export function ModelsScreen({
                     </span>
                   ))}
                 </div>
-              </div>
-            ) : (
+            </div>
+          ) : (
               <div className="modal-panel" role="tabpanel">
                 <div className="advanced-config-card modal-section-card">
                   <div className="panel-header">
