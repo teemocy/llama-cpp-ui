@@ -267,7 +267,8 @@ describe("gateway stage 2 runtime", () => {
       object: "list",
       data: expect.arrayContaining([
         expect.objectContaining({
-          id: fixtureModelArtifact.id,
+          id: fixtureModelProfile.displayName,
+          model_id: fixtureModelArtifact.id,
         }),
       ]),
     });

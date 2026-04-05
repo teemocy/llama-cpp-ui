@@ -109,6 +109,7 @@ describe("shared contracts", () => {
 
     expect(trace.route).toBe("POST /v1/chat/completions");
     expect(modelList.data[0]?.object).toBe("model");
+    expect(modelList.data[0]?.model_id).toBe("model_qwen25_coder");
   });
 
   it("round-trips tool calls, gateway events, and request traces", () => {

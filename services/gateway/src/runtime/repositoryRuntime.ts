@@ -48,6 +48,7 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiModelCard,
   type OpenAiToolCall,
   chatCompletionsChunkSchema,
   chatCompletionsResponseSchema,
@@ -1380,13 +1381,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     };
   }
 
-  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">> {
-    return this.#modelsRepository.list().map((stored) => ({
-      id: stored.artifact.id,
-      object: "model",
-      created: getCreatedEpochSeconds(stored.artifact),
-      owned_by: "localhub",
-    }));
+  listModels(): OpenAiModelCard[] {
+    return this.#modelsRepository.list().map((stored) => {
+      const profile = this.getProfile(stored);
+
+      return {
+        id: profile.displayName,
+        name: profile.displayName,
+        model_id: stored.artifact.id,
+        object: "model",
+        created: getCreatedEpochSeconds(stored.artifact),
+        owned_by: "localhub",
+      };
+    });
   }
 
   listRuntimeModels(): RuntimeModelRecord[] {
@@ -2286,13 +2293,24 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     return stored.profile ?? createDefaultProfile(stored.artifact, this.#defaultModelTtlMs);
   }
 
+  private findStoredModelRecord(modelId: string): StoredModelRecord | undefined {
+    const exactMatch = this.#modelsRepository.findById(modelId);
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    return this.#modelsRepository
+      .list()
+      .find((stored) => this.getProfile(stored).displayName === modelId);
+  }
+
   private getRuntimeModelById(modelId: string): RuntimeModelRecord {
-    const stored = this.#modelsRepository.findById(modelId);
+    const stored = this.findStoredModelRecord(modelId);
     if (!stored) {
       throw new Error(`Unknown model: ${modelId}`);
     }
 
-    return toRuntimeModelRecord(stored, this.#modelSnapshots.get(modelId));
+    return toRuntimeModelRecord(stored, this.#modelSnapshots.get(stored.artifact.id));
   }
 
   private replayModelSnapshots(): void {
@@ -2308,7 +2326,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   private resolveModelRecord(modelId: string): ResolvedModelRecord {
-    const stored = this.#modelsRepository.findById(modelId);
+    const stored = this.findStoredModelRecord(modelId);
     if (!stored) {
       throw new Error(`Unknown model: ${modelId}`);
     }

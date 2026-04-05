@@ -143,6 +143,8 @@ export const embeddingsResponseSchema = z.object({
 
 export const openAiModelCardSchema = z.object({
   id: nonEmptyStringSchema,
+  name: nonEmptyStringSchema.optional(),
+  model_id: nonEmptyStringSchema.optional(),
   object: z.literal("model"),
   created: z.number().int().nonnegative(),
   owned_by: nonEmptyStringSchema,

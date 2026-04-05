@@ -23,6 +23,7 @@ import type {
   DesktopProviderSearchResult,
   EmbeddingsRequest,
   EmbeddingsResponse,
+  OpenAiModelCard,
   RequestRoute,
   RequestTrace,
   RuntimeKey,
@@ -134,7 +135,7 @@ export interface GatewayRuntime {
   start(): MaybePromise<void>;
   stop(): MaybePromise<void>;
   subscribe(subscriber: (event: GatewayEvent) => void, options?: { replay?: boolean }): () => void;
-  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">>;
+  listModels(): OpenAiModelCard[];
   listRuntimeModels(): RuntimeModelRecord[];
   listDesktopModels(): MaybePromise<DesktopModelRecord[]>;
   listDownloads(): MaybePromise<DesktopDownloadList>;

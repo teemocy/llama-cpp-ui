@@ -2,13 +2,17 @@
   "object": "list",
   "data": [
     {
-      "id": "model_qwen25_coder",
+      "id": "Qwen 2.5 Coder (Default)",
+      "name": "Qwen 2.5 Coder (Default)",
+      "model_id": "model_qwen25_coder",
       "object": "model",
       "created": 1774958400,
       "owned_by": "localhub"
     },
     {
-      "id": "model_bge_small_en",
+      "id": "BGE Small Embed",
+      "name": "BGE Small Embed",
+      "model_id": "model_bge_small_en",
       "object": "model",
       "created": 1774958401,
       "owned_by": "localhub"

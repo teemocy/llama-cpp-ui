@@ -29,6 +29,7 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiModelCard,
   type OpenAiToolCall,
   chatCompletionsChunkSchema,
   gatewayEventSchema,
@@ -548,12 +549,14 @@ export class MockGatewayRuntime {
     };
   }
 
-  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">> {
-    return this.listRuntimeModels().map(({ id, object, created, owned_by }) => ({
-      id,
-      object,
-      created,
-      owned_by,
+  listModels(): OpenAiModelCard[] {
+    return this.listDesktopModels().map((model) => ({
+      id: model.displayName,
+      name: model.displayName,
+      model_id: model.id,
+      object: "model",
+      created: Math.floor(Date.parse(model.createdAt) / 1000),
+      owned_by: "localhub",
     }));
   }
 
@@ -1085,11 +1088,13 @@ export class MockGatewayRuntime {
     input: DesktopModelConfigUpdateRequest,
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
-    const existing = this.#modelDetails.get(modelId);
-    if (!existing) {
+    const resolvedModelId = this.resolveModelId(modelId);
+    if (!resolvedModelId) {
       throw new Error(`Unknown model: ${modelId}`);
     }
-    if (existing.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
+
+    const current = this.getDesktopModelRecord(resolvedModelId);
+    if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
         "model_config_requires_cold_state",
         "Evict the model from memory before changing advanced runtime settings.",
@@ -1097,7 +1102,6 @@ export class MockGatewayRuntime {
       );
     }
 
-    const current = this.getDesktopModelRecord(modelId);
     const updated: DesktopModelRecord = {
       ...current,
       ...(input.displayName ? { displayName: input.displayName } : {}),
@@ -1113,16 +1117,18 @@ export class MockGatewayRuntime {
       updatedAt: new Date().toISOString(),
     };
     const baseCapabilities =
-      this.#modelBaseCapabilities.get(modelId) ?? current.capabilities ?? ["chat"];
+      this.#modelBaseCapabilities.get(resolvedModelId) ?? current.capabilities ?? ["chat"];
     updated.capabilities = applyCapabilityOverridesToLabels(
       baseCapabilities,
       updated.capabilityOverrides,
     );
-    updated.role = getModelRole(createModel(modelId, Math.floor(Date.now() / 1000), updated.capabilities));
-    this.#modelDetails.set(modelId, updated);
-    const runtimeModel = this.#models.get(modelId);
+    updated.role = getModelRole(
+      createModel(resolvedModelId, Math.floor(Date.now() / 1000), updated.capabilities),
+    );
+    this.#modelDetails.set(resolvedModelId, updated);
+    const runtimeModel = this.#models.get(resolvedModelId);
     if (runtimeModel) {
-      this.#models.set(modelId, {
+      this.#models.set(resolvedModelId, {
         ...runtimeModel,
         capabilities: [...updated.capabilities],
       });
@@ -1469,9 +1475,29 @@ export class MockGatewayRuntime {
   }
 
   private getDesktopModelRecord(modelId: string): DesktopModelRecord {
-    const updated = this.createDesktopModelRecord(modelId);
-    this.#modelDetails.set(modelId, updated);
+    const resolvedModelId = this.resolveModelId(modelId);
+    if (!resolvedModelId) {
+      throw new Error(`Unknown model: ${modelId}`);
+    }
+
+    const updated = this.createDesktopModelRecord(resolvedModelId);
+    this.#modelDetails.set(resolvedModelId, updated);
     return updated;
+  }
+
+  private resolveModelId(modelId: string): string | undefined {
+    if (this.#models.has(modelId)) {
+      return modelId;
+    }
+
+    for (const candidateId of this.#models.keys()) {
+      const existing = this.#modelDetails.get(candidateId) ?? this.createDesktopModelRecord(candidateId);
+      if (existing.displayName === modelId) {
+        return candidateId;
+      }
+    }
+
+    return undefined;
   }
 
   private getLoadedModelCount(): number {
@@ -1479,7 +1505,8 @@ export class MockGatewayRuntime {
   }
 
   private getModel(modelId: string): RuntimeModelRecord | undefined {
-    return this.#models.get(modelId);
+    const resolvedModelId = this.resolveModelId(modelId);
+    return resolvedModelId ? this.#models.get(resolvedModelId) : undefined;
   }
 
   private transitionModel(
