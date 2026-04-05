@@ -35,6 +35,7 @@ export const desktopConfigRecordSchema = z.object({
   autoLaunchGateway: z.boolean().default(true),
   theme: z.enum(["system", "light", "dark"]).default("system"),
   controlAuthHeaderName: z.enum(["authorization", "x-api-key", "api-key"]).default("authorization"),
+  controlAuthToken: nonEmptyStringSchema.optional(),
   preferredWindowWidth: z.number().int().positive().default(1440),
   preferredWindowHeight: z.number().int().positive().default(960),
   logLevel: logLevelSchema.default("info"),

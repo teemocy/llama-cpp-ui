@@ -76,6 +76,7 @@ describe("platform helpers", () => {
 
     writeConfigFile(filePath, {
       controlAuthHeaderName: "x-api-key",
+      controlAuthToken: "test-secret-value",
     });
 
     const config = loadDesktopConfig({
@@ -85,6 +86,7 @@ describe("platform helpers", () => {
     });
 
     expect(config.value.controlAuthHeaderName).toBe("x-api-key");
+    expect(config.value.controlAuthToken).toBe("test-secret-value");
     expect(config.sources).toContain("file");
   });
 

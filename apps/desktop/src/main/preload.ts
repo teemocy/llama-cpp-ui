@@ -142,6 +142,8 @@ const api = {
     getPaths: () => ipcRenderer.invoke(IPC_CHANNELS.systemGetPaths) as Promise<DesktopSystemPaths>,
     getRuntimeContext: () =>
       ipcRenderer.invoke(IPC_CHANNELS.systemGetRuntimeContext) as Promise<DesktopRuntimeContext>,
+    revealPath: (filePath: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.systemRevealPath, filePath) as Promise<boolean>,
     pickModelsDirectory: () =>
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayOpenModelsDirectoryDialog,
@@ -151,10 +153,13 @@ const api = {
         IPC_CHANNELS.systemUpdateModelsDirectory,
         modelsDir,
       ) as Promise<DesktopRuntimeContext>,
-    updateControlAuthHeaderName: (headerName: string) =>
+    updateControlAuthSettings: (payload: {
+      headerName: "authorization" | "x-api-key" | "api-key";
+      token?: string;
+    }) =>
       ipcRenderer.invoke(
-        IPC_CHANNELS.systemUpdateControlAuthHeaderName,
-        headerName,
+        IPC_CHANNELS.systemUpdateControlAuthSettings,
+        payload,
       ) as Promise<DesktopRuntimeContext>,
   },
 };

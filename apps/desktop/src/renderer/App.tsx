@@ -26,6 +26,8 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -34,6 +36,8 @@ type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -160,7 +164,7 @@ export function App() {
 
     const unsubscribeEvents = window.desktopApi.gateway.subscribeEvents((event) => {
       startTransition(() => {
-        setEvents((current) => [event, ...current].slice(0, 40));
+        setEvents((current) => [event, ...current].slice(0, 100));
       });
 
       if (event.type === "MODEL_STATE_CHANGED") {
@@ -329,12 +333,22 @@ export function App() {
     requestRefresh();
   };
 
-  const updateControlAuthHeaderName = async (headerName: ControlAuthHeaderName): Promise<void> => {
-    const updatedContext = await window.desktopApi.system.updateControlAuthHeaderName(headerName);
+  const updateControlAuthSettings = async (payload: {
+    headerName: ControlAuthHeaderName;
+    token: string;
+  }): Promise<void> => {
+    const updatedContext = await window.desktopApi.system.updateControlAuthSettings({
+      headerName: payload.headerName,
+      token: payload.token,
+    });
     startTransition(() => {
       setRuntimeContext(updatedContext);
     });
     requestRefresh();
+  };
+
+  const revealSessionLogFile = async (filePath: string): Promise<void> => {
+    await window.desktopApi.system.revealPath(filePath);
   };
 
   const restartGateway = async (): Promise<void> => {
@@ -470,7 +484,13 @@ export function App() {
             <Route
               path="/observability"
               element={
-                <ObservabilityScreen events={events} health={health} shellState={shellState} />
+                <ObservabilityScreen
+                  events={events}
+                  health={health}
+                  paths={paths}
+                  onRevealSessionLogFile={revealSessionLogFile}
+                  shellState={shellState}
+                />
               }
             />
             <Route
@@ -480,7 +500,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
-                  onUpdateControlAuthHeaderName={updateControlAuthHeaderName}
+                  onUpdateControlAuthSettings={updateControlAuthSettings}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}
                   runtimeContext={runtimeContext}

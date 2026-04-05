@@ -18,6 +18,7 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  shell,
 } from "electron";
 import { loadGatewayConfig } from "../../../../services/gateway/src/config";
 import { IPC_CHANNELS } from "./channels";
@@ -28,6 +29,8 @@ export type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -56,7 +59,10 @@ let desktopConfig = loadDesktopConfig({
   cwd: workspaceRoot,
   environment: runtimeEnvironment,
 });
-const gatewayManager = new GatewayManager(() => desktopConfig.value.controlAuthHeaderName);
+const gatewayManager = new GatewayManager({
+  getControlAuthHeaderName: () => desktopConfig.value.controlAuthHeaderName,
+  getControlAuthToken: () => desktopConfig.value.controlAuthToken,
+});
 const appPaths = ensureAppPaths(
   resolveAppPaths({
     cwd: workspaceRoot,
@@ -140,6 +146,10 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
     closeToTray: desktopConfig.value.closeToTray,
     autoLaunchGateway: desktopConfig.value.autoLaunchGateway,
     theme: desktopConfig.value.theme,
+    controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
+    ...(desktopConfig.value.controlAuthToken !== undefined
+      ? { controlAuthToken: desktopConfig.value.controlAuthToken }
+      : {}),
   },
   gateway: {
     enableLan: sharedGatewayConfig.value.enableLan,
@@ -315,24 +325,34 @@ const registerIpcHandlers = (): void => {
       return buildRuntimeContext();
     },
   );
+  ipcMain.handle(IPC_CHANNELS.systemRevealPath, async (_event, filePath: string) =>
+    shell.showItemInFolder(filePath),
+  );
   ipcMain.handle(
-    IPC_CHANNELS.systemUpdateControlAuthHeaderName,
-    async (_event, rawHeaderName: string): Promise<DesktopRuntimeContext> => {
-      const controlAuthHeaderName = rawHeaderName.trim();
+    IPC_CHANNELS.systemUpdateControlAuthSettings,
+    async (
+      _event,
+      payload: { headerName: ControlAuthHeaderName; token?: string | undefined },
+    ): Promise<DesktopRuntimeContext> => {
       if (
-        controlAuthHeaderName !== "authorization" &&
-        controlAuthHeaderName !== "x-api-key" &&
-        controlAuthHeaderName !== "api-key"
+        payload.headerName !== "authorization" &&
+        payload.headerName !== "x-api-key" &&
+        payload.headerName !== "api-key"
       ) {
         throw new Error("Unsupported control auth header name.");
       }
 
+      const controlAuthToken = payload.token?.trim();
+
       mkdirSync(path.dirname(desktopConfig.filePath), { recursive: true });
       writeConfigFile(desktopConfig.filePath, {
         ...desktopConfig.value,
-        controlAuthHeaderName,
+        controlAuthHeaderName: payload.headerName,
+        controlAuthToken:
+          controlAuthToken && controlAuthToken.length > 0 ? controlAuthToken : undefined,
       });
       reloadDesktopConfig();
+      await gatewayManager.restart();
 
       return buildRuntimeContext();
     },

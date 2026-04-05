@@ -660,8 +660,8 @@ If public auth is disabled, omit the `Authorization` header.
 Clients that prefer API-key style headers can also send the same token as
 `x-api-key` or `api-key` on either plane.
 
-In the desktop Settings screen, you can choose which header name the desktop
-uses for its own gateway requests.
+In the desktop Settings screen, you can choose the header name and paste the
+token value the desktop uses for its own gateway requests.
 
 ## 5. Known Gaps and Current Limitations
 

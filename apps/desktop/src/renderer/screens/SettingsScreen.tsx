@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -12,6 +14,8 @@ type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -21,7 +25,6 @@ type DesktopRuntimeContext = {
     corsAllowlist: string[];
     defaultModelTtlMs: number;
     localModelsDir: string;
-    controlAuthHeaderName: ControlAuthHeaderName;
     authConfigured: boolean;
   };
   files: {
@@ -37,7 +40,10 @@ type SettingsScreenProps = {
   onPickModelsDirectory(): Promise<string | null>;
   onRestartGateway(): Promise<void>;
   onShutdownGateway(): Promise<void>;
-  onUpdateControlAuthHeaderName(headerName: ControlAuthHeaderName): Promise<void>;
+  onUpdateControlAuthSettings(payload: {
+    headerName: ControlAuthHeaderName;
+    token: string;
+  }): Promise<void>;
   onUpdateModelsDirectory(modelsDir: string): Promise<void>;
 };
 
@@ -50,12 +56,12 @@ export function SettingsScreen({
   onPickModelsDirectory,
   onRestartGateway,
   onShutdownGateway,
-  onUpdateControlAuthHeaderName,
+  onUpdateControlAuthSettings,
   onUpdateModelsDirectory,
 }: SettingsScreenProps) {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [busyAction, setBusyAction] = useState<
-    "restart" | "shutdown" | "models-dir" | "auth-header" | null
+    "restart" | "shutdown" | "models-dir" | "auth-settings" | null
   >(null);
   const [pathFeedback, setPathFeedback] = useState<{
     tone: "success" | "error";
@@ -68,6 +74,7 @@ export function SettingsScreen({
   const [modelsDirDraft, setModelsDirDraft] = useState("");
   const [controlAuthHeaderDraft, setControlAuthHeaderDraft] =
     useState<ControlAuthHeaderName>("authorization");
+  const [controlAuthTokenDraft, setControlAuthTokenDraft] = useState("");
 
   useEffect(() => {
     const dismissed = window.localStorage.getItem(FIRST_RUN_KEY) === "true";
@@ -81,10 +88,14 @@ export function SettingsScreen({
   }, [runtimeContext?.gateway.localModelsDir]);
 
   useEffect(() => {
-    if (runtimeContext?.gateway.controlAuthHeaderName) {
-      setControlAuthHeaderDraft(runtimeContext.gateway.controlAuthHeaderName);
+    if (runtimeContext?.desktop.controlAuthHeaderName) {
+      setControlAuthHeaderDraft(runtimeContext.desktop.controlAuthHeaderName);
     }
-  }, [runtimeContext?.gateway.controlAuthHeaderName]);
+  }, [runtimeContext?.desktop.controlAuthHeaderName]);
+
+  useEffect(() => {
+    setControlAuthTokenDraft(runtimeContext?.desktop.controlAuthToken ?? "");
+  }, [runtimeContext?.desktop.controlAuthToken]);
 
   const dismissOnboarding = () => {
     window.localStorage.setItem(FIRST_RUN_KEY, "true");
@@ -142,24 +153,27 @@ export function SettingsScreen({
     }
   };
 
-  const saveControlAuthHeaderName = async () => {
+  const saveControlAuthSettings = async () => {
     if (!runtimeContext) {
       return;
     }
 
-    setBusyAction("auth-header");
+    setBusyAction("auth-settings");
     setAuthHeaderFeedback(null);
 
     try {
-      await onUpdateControlAuthHeaderName(controlAuthHeaderDraft);
+      await onUpdateControlAuthSettings({
+        headerName: controlAuthHeaderDraft,
+        token: controlAuthTokenDraft,
+      });
       setAuthHeaderFeedback({
         tone: "success",
-        text: "Desktop requests now use the selected auth header name.",
+        text: "Desktop requests now use the selected auth header and token.",
       });
     } catch (error) {
       setAuthHeaderFeedback({
         tone: "error",
-        text: error instanceof Error ? error.message : "Unable to update the auth header name.",
+        text: error instanceof Error ? error.message : "Unable to update auth settings.",
       });
     } finally {
       setBusyAction(null);
@@ -175,7 +189,8 @@ export function SettingsScreen({
   const canSaveControlAuthHeader =
     runtimeContext !== null &&
     busyAction === null &&
-    controlAuthHeaderDraft !== runtimeContext.gateway.controlAuthHeaderName;
+    (controlAuthHeaderDraft !== runtimeContext.desktop.controlAuthHeaderName ||
+      controlAuthTokenDraft !== (runtimeContext.desktop.controlAuthToken ?? ""));
 
   const lanRisk =
     runtimeContext?.gateway.enableLan && !runtimeContext.gateway.authRequired
@@ -244,8 +259,8 @@ export function SettingsScreen({
         <span className="section-label">Control-plane headers</span>
         <h3>Outbound auth header</h3>
         <p>
-          Choose which header name the desktop sends when it talks to the gateway. The gateway
-          accepts bearer and API-key style headers either way.
+          Choose the header name and secret the desktop sends when it talks to the gateway. The
+          gateway accepts bearer and API-key style headers either way.
         </p>
         <div className="settings-grid">
           <label className="field-stack">
@@ -261,6 +276,17 @@ export function SettingsScreen({
               <option value="x-api-key">x-api-key</option>
               <option value="api-key">api-key</option>
             </select>
+          </label>
+          <label className="field-stack">
+            <span className="section-label">API key</span>
+            <input
+              autoComplete="off"
+              className="text-input"
+              onChange={(event) => setControlAuthTokenDraft(event.target.value)}
+              placeholder="Paste your API key here"
+              type="password"
+              value={controlAuthTokenDraft}
+            />
           </label>
         </div>
         {authHeaderFeedback ? (
@@ -279,10 +305,10 @@ export function SettingsScreen({
           <button
             className="primary-button"
             disabled={!canSaveControlAuthHeader}
-            onClick={() => void saveControlAuthHeaderName()}
+            onClick={() => void saveControlAuthSettings()}
             type="button"
           >
-            {busyAction === "auth-header" ? "Saving..." : "Save header"}
+            {busyAction === "auth-settings" ? "Saving..." : "Save auth settings"}
           </button>
         </div>
       </article>

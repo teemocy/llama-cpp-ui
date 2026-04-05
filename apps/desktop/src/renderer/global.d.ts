@@ -30,6 +30,8 @@ import type {
 type DesktopSystemPaths = {
   workspaceRoot: string;
   supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
   discoveryFile: string;
 };
 
@@ -38,6 +40,8 @@ type DesktopRuntimeContext = {
     closeToTray: boolean;
     autoLaunchGateway: boolean;
     theme: "system" | "light" | "dark";
+    controlAuthHeaderName: ControlAuthHeaderName;
+    controlAuthToken?: string;
   };
   gateway: {
     enableLan: boolean;
@@ -110,9 +114,13 @@ type DesktopApi = {
   system: {
     getPaths(): Promise<DesktopSystemPaths>;
     getRuntimeContext(): Promise<DesktopRuntimeContext>;
+    revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
-    updateControlAuthHeaderName(headerName: ControlAuthHeaderName): Promise<DesktopRuntimeContext>;
+    updateControlAuthSettings(payload: {
+      headerName: ControlAuthHeaderName;
+      token?: string;
+    }): Promise<DesktopRuntimeContext>;
   };
 };
 

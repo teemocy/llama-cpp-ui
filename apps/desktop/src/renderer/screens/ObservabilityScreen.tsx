@@ -10,10 +10,20 @@ import {
   selectLiveConsoleEvents,
 } from "../telemetry";
 
+type DesktopSystemPaths = {
+  workspaceRoot: string;
+  supportDir: string;
+  logsDir: string;
+  sessionLogFile: string;
+  discoveryFile: string;
+};
+
 type ObservabilityScreenProps = {
   shellState: DesktopShellState;
   health: GatewayHealthSnapshot | null;
+  paths: DesktopSystemPaths | null;
   events: GatewayEvent[];
+  onRevealSessionLogFile(filePath: string): Promise<void>;
 };
 
 const formatClock = (value?: string | null): string => {
@@ -57,7 +67,13 @@ const findLatestTraceRoute = (events: GatewayEvent[]): string | null => {
   return typeof payload?.route === "string" ? payload.route : null;
 };
 
-export function ObservabilityScreen({ events, health, shellState }: ObservabilityScreenProps) {
+export function ObservabilityScreen({
+  events,
+  health,
+  onRevealSessionLogFile,
+  paths,
+  shellState,
+}: ObservabilityScreenProps) {
   const activityEvents = selectActivityRailEvents(events);
   const liveConsoleEvents = selectLiveConsoleEvents(events);
   const residentMemoryBytes = findMetricValue(events, "residentMemoryBytes");
@@ -107,6 +123,26 @@ export function ObservabilityScreen({ events, health, shellState }: Observabilit
       <article className="wide-card observability-card">
         <span className="section-label">Live log console</span>
         <h3>Gateway log and trace stream</h3>
+        <div className="detail-meta-note">
+          <strong>Current session log</strong>
+          <p className="session-log-path">
+            {paths?.sessionLogFile ?? "Waiting for the gateway to create a session log file."}
+          </p>
+          <div className="button-row">
+            <button
+              className="secondary-button"
+              disabled={!paths?.sessionLogFile}
+              onClick={() => {
+                if (paths?.sessionLogFile) {
+                  void onRevealSessionLogFile(paths.sessionLogFile);
+                }
+              }}
+              type="button"
+            >
+              Reveal in folder
+            </button>
+          </div>
+        </div>
         <div className="log-console">
           {liveConsoleEvents.length === 0 ? (
             <p>Waiting for gateway logs or request traces.</p>

@@ -783,6 +783,14 @@ select {
   color: var(--muted);
 }
 
+.session-log-path {
+  margin-top: 4px;
+  color: var(--ink);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
 .capability-override-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
