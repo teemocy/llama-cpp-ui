@@ -14,6 +14,46 @@ import type { RequestTrace } from "@localhub/shared-contracts/foundation-request
 import { requestTraceToApiLogRecord } from "../request-trace-persistence.js";
 import { parseJson, stringifyJson } from "./helpers.js";
 
+const CHAT_MESSAGE_CONTENT_WRAPPER_KIND = "localhub.chat.content";
+
+function serializeChatMessageContent(content: ChatMessage["content"]): string | null {
+  if (content === null) {
+    return null;
+  }
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  return stringifyJson({
+    kind: CHAT_MESSAGE_CONTENT_WRAPPER_KIND,
+    parts: content,
+  });
+}
+
+function deserializeChatMessageContent(rawContent: string | null): ChatMessage["content"] {
+  if (rawContent === null) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawContent) as unknown;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      (parsed as { kind?: unknown }).kind === CHAT_MESSAGE_CONTENT_WRAPPER_KIND &&
+      Array.isArray((parsed as { parts?: unknown }).parts)
+    ) {
+      return (parsed as { parts: ChatMessage["content"] }).parts;
+    }
+  } catch {
+    return rawContent;
+  }
+
+  return rawContent;
+}
+
 export class ChatRepository {
   readonly #database: DatabaseSync;
 
@@ -68,15 +108,15 @@ export class ChatRepository {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `,
       )
-      .run(
-        parsed.id,
-        parsed.sessionId,
-        parsed.role,
-        parsed.content,
-        serializeToolCalls(parsed.toolCalls),
-        parsed.tokensCount ?? null,
-        stringifyJson(parsed.metadata),
-        parsed.createdAt,
+        .run(
+          parsed.id,
+          parsed.sessionId,
+          parsed.role,
+          serializeChatMessageContent(parsed.content),
+          serializeToolCalls(parsed.toolCalls),
+          parsed.tokensCount ?? null,
+          stringifyJson(parsed.metadata),
+          parsed.createdAt,
       );
   }
 
@@ -132,7 +172,7 @@ export class ChatRepository {
         id: row.id,
         sessionId: row.session_id,
         role: row.role,
-        content: row.content,
+        content: deserializeChatMessageContent(row.content),
         toolCalls: deserializeToolCalls(row.tool_calls_json),
         tokensCount: row.tokens_count ?? undefined,
         metadata: parseJson(row.metadata_json, {}),

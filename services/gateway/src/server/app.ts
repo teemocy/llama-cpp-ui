@@ -491,6 +491,31 @@ async function registerControlApp(
     return runtime.runChat(parsed.data, request.id);
   });
 
+  app.post("/control/chat/run/stream", async (request, reply) => {
+    const parsed = desktopChatRunRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return sendValidationError(
+        reply,
+        request.id,
+        parsed.error.issues[0]?.message ?? "Invalid chat run payload.",
+      );
+    }
+
+    const result = await runtime.runChatStream(parsed.data, request.id);
+
+    reply.hijack();
+    reply.raw.statusCode = 200;
+    reply.raw.setHeader("content-type", result.contentType);
+    reply.raw.setHeader("cache-control", "no-cache, no-transform");
+    reply.raw.setHeader("connection", "keep-alive");
+    reply.raw.setHeader("x-request-id", request.id);
+    reply.raw.setHeader("x-localhub-session-id", result.session.id);
+    reply.raw.setHeader("x-localhub-user-message-id", result.userMessageId);
+    reply.raw.setHeader("x-localhub-assistant-message-id", result.assistantMessageId);
+    Readable.fromWeb(result.stream as globalThis.ReadableStream<Uint8Array>).pipe(reply.raw);
+    return reply;
+  });
+
   app.get("/control/observability/api-logs", async (request) => {
     const rawLimit = (request.query as { limit?: unknown }).limit;
     const limit =

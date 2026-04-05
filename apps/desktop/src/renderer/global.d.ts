@@ -4,6 +4,7 @@ import type {
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
+  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
   DesktopDownloadActionResponse,
@@ -87,6 +88,7 @@ type DesktopApi = {
     upsertChatSession(payload: DesktopChatSessionUpsertRequest): Promise<ChatSession>;
     deleteChatSession(sessionId: string): Promise<void>;
     runChat(payload: DesktopChatRunRequest): Promise<DesktopChatRunResponse>;
+    subscribeChatStream(listener: (event: DesktopChatStreamEvent) => void): Unsubscribe;
     listApiLogs(limit?: number): Promise<DesktopApiLogList>;
     searchCatalog(query: string): Promise<DesktopProviderSearchResult>;
     getCatalogModel(

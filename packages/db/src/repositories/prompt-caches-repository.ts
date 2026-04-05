@@ -58,35 +58,25 @@ export class PromptCachesRepository {
   ): (PromptCacheRecord & { metadata: Record<string, unknown> }) | undefined {
     const row = this.#database
       .prepare("SELECT * FROM prompt_caches WHERE cache_key = ?")
-      .get(cacheKey) as
-      | {
-          id: string;
-          model_id: string;
-          cache_key: string;
-          file_path: string;
-          size_bytes: number;
-          last_accessed_at: string;
-          expires_at: string | null;
-          metadata_json: string;
-        }
-      | undefined;
+      .get(cacheKey) as PromptCacheRow | undefined;
 
-    if (!row) {
-      return undefined;
-    }
+    return row ? this.parseRow(row) : undefined;
+  }
 
-    return {
-      ...promptCacheRecordSchema.parse({
-        id: row.id,
-        modelId: row.model_id,
-        cacheKey: row.cache_key,
-        filePath: row.file_path,
-        sizeBytes: row.size_bytes,
-        lastAccessedAt: row.last_accessed_at,
-        expiresAt: row.expires_at ?? undefined,
-      }),
-      metadata: parseJson(row.metadata_json, {}),
-    };
+  list(): Array<PromptCacheRecord & { metadata: Record<string, unknown> }> {
+    return (
+      this.#database
+        .prepare("SELECT * FROM prompt_caches ORDER BY last_accessed_at DESC")
+        .all() as PromptCacheRow[]
+    ).map((row) => this.parseRow(row));
+  }
+
+  listByModelId(modelId: string): Array<PromptCacheRecord & { metadata: Record<string, unknown> }> {
+    return (
+      this.#database
+        .prepare("SELECT * FROM prompt_caches WHERE model_id = ? ORDER BY last_accessed_at DESC")
+        .all(modelId) as PromptCacheRow[]
+    ).map((row) => this.parseRow(row));
   }
 
   touch(cacheKey: string, lastAccessedAt = new Date().toISOString()): void {
@@ -100,4 +90,34 @@ export class PromptCachesRepository {
       )
       .run(lastAccessedAt, cacheKey);
   }
+
+  removeByCacheKey(cacheKey: string): void {
+    this.#database.prepare("DELETE FROM prompt_caches WHERE cache_key = ?").run(cacheKey);
+  }
+
+  private parseRow(row: PromptCacheRow): PromptCacheRecord & { metadata: Record<string, unknown> } {
+    return {
+      ...promptCacheRecordSchema.parse({
+        id: row.id,
+        modelId: row.model_id,
+        cacheKey: row.cache_key,
+        filePath: row.file_path,
+        sizeBytes: row.size_bytes,
+        lastAccessedAt: row.last_accessed_at,
+        expiresAt: row.expires_at ?? undefined,
+      }),
+      metadata: parseJson(row.metadata_json, {}),
+    };
+  }
 }
+
+type PromptCacheRow = {
+  id: string;
+  model_id: string;
+  cache_key: string;
+  file_path: string;
+  size_bytes: number;
+  last_accessed_at: string;
+  expires_at: string | null;
+  metadata_json: string;
+};

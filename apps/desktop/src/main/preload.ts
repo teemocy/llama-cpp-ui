@@ -3,6 +3,7 @@ import type {
   DesktopChatMessageList,
   DesktopChatRunRequest,
   DesktopChatRunResponse,
+  DesktopChatStreamEvent,
   DesktopChatSessionList,
   DesktopChatSessionUpsertRequest,
   DesktopDownloadActionResponse,
@@ -96,6 +97,8 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.gatewayDeleteChatSession, sessionId) as Promise<void>,
     runChat: (payload: DesktopChatRunRequest) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayRunChat, payload) as Promise<DesktopChatRunResponse>,
+    subscribeChatStream: (listener: Listener<DesktopChatStreamEvent>) =>
+      subscribe(IPC_CHANNELS.gatewayChatStream, listener),
     listApiLogs: (limit?: number) =>
       ipcRenderer.invoke(IPC_CHANNELS.gatewayListApiLogs, limit) as Promise<DesktopApiLogList>,
     searchCatalog: (query: string) =>

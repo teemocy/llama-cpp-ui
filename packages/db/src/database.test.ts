@@ -71,6 +71,52 @@ describe("db foundation", () => {
     expect(tokens.listActive()).toHaveLength(1);
   });
 
+  it("reuses an engine version row when the binary path is already recorded", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const engines = new EngineVersionsRepository(testDatabase.database);
+    const binaryPath = "/engines/llama.cpp/shared/llama-server";
+
+    const firstId = engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_stage1",
+      versionTag: "stage1-fixture",
+      binaryPath,
+      isActive: false,
+      installedAt: "2026-03-31T12:00:00.000Z",
+    });
+
+    const secondId = engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_stage2",
+      versionTag: "stage2-runtime",
+      binaryPath,
+      isActive: true,
+      installedAt: "2026-04-01T12:00:00.000Z",
+    });
+
+    engines.setActive("llama.cpp", secondId);
+
+    expect(firstId).toBe("engine_llamacpp_stage1");
+    expect(secondId).toBe(firstId);
+    expect(engines.list()).toEqual([
+      expect.objectContaining({
+        id: firstId,
+        versionTag: "stage2-runtime",
+        binaryPath,
+        isActive: true,
+        installedAt: "2026-04-01T12:00:00.000Z",
+      }),
+    ]);
+    expect(engines.findActive("llama.cpp")).toMatchObject({
+      id: firstId,
+      versionTag: "stage2-runtime",
+      binaryPath,
+      isActive: true,
+    });
+  });
+
   it("persists chat and audit records", () => {
     const testDatabase = createTestDatabase();
     cleanup = testDatabase.cleanup;
@@ -87,6 +133,37 @@ describe("db foundation", () => {
     expect(chat.listMessages(fixtureChatSession.id)).toHaveLength(1);
     expect(apiLogId).toBeGreaterThan(0);
     expect(chat.listRecentApiLogs()).toHaveLength(1);
+  });
+
+  it("round-trips multimodal chat message content", () => {
+    const testDatabase = createTestDatabase();
+    cleanup = testDatabase.cleanup;
+
+    const models = new ModelsRepository(testDatabase.database);
+    const chat = new ChatRepository(testDatabase.database);
+    const multimodalContent = [
+      {
+        type: "text" as const,
+        text: "Describe the screenshot.",
+      },
+      {
+        type: "image_url" as const,
+        image_url: {
+          url: "data:image/png;base64,AAAA",
+        },
+      },
+    ];
+
+    models.save(fixtureModelArtifact, fixtureModelProfile);
+    chat.upsertSession(fixtureChatSession);
+    chat.appendMessage({
+      ...fixtureChatMessage,
+      id: "message_multimodal",
+      content: multimodalContent,
+      tokensCount: 8,
+    });
+
+    expect(chat.listMessages(fixtureChatSession.id)[0]?.content).toEqual(multimodalContent);
   });
 
   it("deletes chat sessions and cascades their messages", () => {

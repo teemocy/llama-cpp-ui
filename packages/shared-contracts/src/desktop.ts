@@ -14,7 +14,11 @@ import {
   modelSourceKindSchema,
   runtimeRoleSchema,
 } from "./models.js";
-import { openAiMessageSchema } from "./openai.js";
+import {
+  openAiMessageContentPartSchema,
+  openAiMessageSchema,
+  openAiToolCallSchema,
+} from "./openai.js";
 import { apiLogRecordSchema, chatMessageSchema, chatSessionSchema } from "./persistence.js";
 
 export const desktopModelRuntimeStateSchema = z.enum([
@@ -33,6 +37,7 @@ export const modelSummarySchema = z.object({
   state: desktopModelRuntimeStateSchema,
   sizeLabel: z.string(),
   tags: z.array(z.string()).default([]),
+  capabilities: z.array(z.string()).default([]),
   contextLength: z.number().int().positive().optional(),
   description: z.string().optional(),
   lastUsedAt: isoDatetimeSchema.optional(),
@@ -62,6 +67,28 @@ export const desktopEngineRecordSchema = z.object({
 export const desktopEngineListSchema = z.object({
   object: z.literal("list"),
   data: z.array(desktopEngineRecordSchema),
+});
+
+export const desktopEngineInstallRequestSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("download-latest-metal"),
+    versionTag: nonEmptyStringSchema.optional(),
+  }),
+  z.object({
+    action: z.literal("import-local-binary"),
+    filePath: fileSystemPathSchema,
+    versionTag: nonEmptyStringSchema.optional(),
+  }),
+  z.object({
+    action: z.literal("activate-installed-version"),
+    versionTag: nonEmptyStringSchema,
+  }),
+]);
+
+export const desktopEngineInstallResponseSchema = z.object({
+  accepted: z.boolean(),
+  engine: desktopEngineRecordSchema,
+  notes: z.array(z.string()).default([]),
 });
 
 export const desktopModelRecordSchema = z.object({
@@ -144,8 +171,37 @@ export const desktopChatRunRequestSchema = z.object({
   sessionId: nonEmptyStringSchema.optional(),
   model: nonEmptyStringSchema,
   systemPrompt: z.string().optional(),
-  message: z.string().min(1),
+  message: z.union([z.string().min(1), z.array(openAiMessageContentPartSchema).min(1)]),
+  clientRequestId: nonEmptyStringSchema.optional(),
+  maxTokens: positiveIntegerSchema.optional(),
 });
+
+export const desktopChatStreamEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("start"),
+    clientRequestId: nonEmptyStringSchema,
+    sessionId: nonEmptyStringSchema,
+  }),
+  z.object({
+    type: z.literal("delta"),
+    clientRequestId: nonEmptyStringSchema,
+    sessionId: nonEmptyStringSchema,
+    contentDelta: z.string().optional(),
+    reasoningDelta: z.string().optional(),
+    toolCalls: z.array(openAiToolCallSchema).optional(),
+  }),
+  z.object({
+    type: z.literal("done"),
+    clientRequestId: nonEmptyStringSchema,
+    sessionId: nonEmptyStringSchema,
+  }),
+  z.object({
+    type: z.literal("error"),
+    clientRequestId: nonEmptyStringSchema,
+    sessionId: nonEmptyStringSchema.optional(),
+    errorMessage: nonEmptyStringSchema,
+  }),
+]);
 
 export const desktopChatRunResponseSchema = z.object({
   session: chatSessionSchema,
@@ -300,6 +356,8 @@ export type DesktopModelArtifactStatus = z.infer<typeof desktopModelArtifactStat
 export type DesktopEngineChannel = z.infer<typeof desktopEngineChannelSchema>;
 export type DesktopEngineRecord = z.infer<typeof desktopEngineRecordSchema>;
 export type DesktopEngineList = z.infer<typeof desktopEngineListSchema>;
+export type DesktopEngineInstallRequest = z.infer<typeof desktopEngineInstallRequestSchema>;
+export type DesktopEngineInstallResponse = z.infer<typeof desktopEngineInstallResponseSchema>;
 export type DesktopModelRecord = z.infer<typeof desktopModelRecordSchema>;
 export type DesktopModelLibrary = z.infer<typeof desktopModelLibrarySchema>;
 export type DesktopLocalModelImportRequest = z.infer<typeof desktopLocalModelImportRequestSchema>;
@@ -313,6 +371,7 @@ export type DesktopChatMessageList = z.infer<typeof desktopChatMessageListSchema
 export type DesktopChatSessionUpsertRequest = z.infer<typeof desktopChatSessionUpsertRequestSchema>;
 export type DesktopChatRunRequest = z.infer<typeof desktopChatRunRequestSchema>;
 export type DesktopChatRunResponse = z.infer<typeof desktopChatRunResponseSchema>;
+export type DesktopChatStreamEvent = z.infer<typeof desktopChatStreamEventSchema>;
 export type DesktopApiLogList = z.infer<typeof desktopApiLogListSchema>;
 export type DesktopProviderSearchItem = z.infer<typeof desktopProviderSearchItemSchema>;
 export type DesktopProviderSearchResult = z.infer<typeof desktopProviderSearchResultSchema>;

@@ -55,6 +55,14 @@ export interface EngineInstallResult {
   notes: string[];
 }
 
+export interface EngineActivationResult {
+  success: boolean;
+  versionTag: string;
+  registryFile: string;
+  binaryPath?: string;
+  notes: string[];
+}
+
 export interface ResolveCommandInput {
   artifact: ModelArtifact;
   profile: ModelProfile;
@@ -98,6 +106,7 @@ export interface EngineAdapter {
   readonly engineType: string;
   probe(): Promise<EngineProbeResult>;
   install(versionTag: string): Promise<EngineInstallResult>;
+  activate(versionTag: string, supportRoot?: string): Promise<EngineActivationResult>;
   resolveCommand(input: ResolveCommandInput): Promise<ResolvedCommand>;
   healthCheck(runtimeKey: RuntimeKey): Promise<EngineHealthCheck>;
   normalizeResponse(payload: unknown): unknown;

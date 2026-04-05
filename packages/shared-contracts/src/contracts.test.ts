@@ -10,6 +10,7 @@ import {
   deserializeRequestTrace,
   deserializeToolCalls,
   desktopDownloadCreateRequestSchema,
+  desktopChatRunRequestSchema,
   desktopProviderSearchItemSchema,
   downloadTaskSchema,
   embeddingsRequestSchema,
@@ -201,6 +202,34 @@ describe("shared contracts", () => {
     });
 
     expect(request.stream).toBe(true);
+  });
+
+  it("accepts multimodal chat request payloads", () => {
+    const content = [
+      {
+        type: "text",
+        text: "Describe this image.",
+      },
+      {
+        type: "image_url",
+        image_url: {
+          url: "data:image/png;base64,AAAA",
+        },
+      },
+    ];
+
+    const openAiRequest = chatCompletionsRequestSchema.parse({
+      model: "qwen2.5-vl-7b-instruct-q4",
+      messages: [{ role: "user", content }],
+      stream: false,
+    });
+    const desktopRequest = desktopChatRunRequestSchema.parse({
+      model: "qwen2.5-vl-7b-instruct-q4",
+      message: content,
+    });
+
+    expect(Array.isArray(openAiRequest.messages[0]?.content)).toBe(true);
+    expect(Array.isArray(desktopRequest.message)).toBe(true);
   });
 
   it("keeps health snapshots URL-safe", () => {

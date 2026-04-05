@@ -4,6 +4,36 @@ import { jsonRecordSchema, nonEmptyStringSchema, positiveIntegerSchema } from ".
 
 export const openAiRoleSchema = z.enum(["system", "user", "assistant", "tool"]);
 
+const openAiDataUrlSchema = nonEmptyStringSchema.refine(
+  (value) => value.toLowerCase().startsWith("data:"),
+  "A data URL or remote URL is required.",
+);
+
+export const openAiImageUrlSchema = z.object({
+  url: z.union([z.string().url(), openAiDataUrlSchema]),
+  detail: z.enum(["auto", "low", "high"]).optional(),
+});
+
+export const openAiTextContentPartSchema = z.object({
+  type: z.literal("text"),
+  text: nonEmptyStringSchema,
+});
+
+export const openAiImageContentPartSchema = z.object({
+  type: z.literal("image_url"),
+  image_url: openAiImageUrlSchema,
+});
+
+export const openAiMessageContentPartSchema = z.union([
+  openAiTextContentPartSchema,
+  openAiImageContentPartSchema,
+]);
+
+export const openAiMessageContentSchema = z.union([
+  z.string(),
+  z.array(openAiMessageContentPartSchema).min(1),
+]);
+
 export const openAiToolSchema = z.object({
   type: z.literal("function"),
   function: z.object({
@@ -24,7 +54,8 @@ export const openAiToolCallSchema = z.object({
 
 export const openAiMessageSchema = z.object({
   role: openAiRoleSchema,
-  content: z.union([z.string(), z.array(jsonRecordSchema)]).nullable(),
+  content: openAiMessageContentSchema.nullable(),
+  reasoning_content: z.string().nullable().optional(),
   name: nonEmptyStringSchema.optional(),
   tool_call_id: nonEmptyStringSchema.optional(),
   tool_calls: z.array(openAiToolCallSchema).optional(),
@@ -68,6 +99,7 @@ export const chatCompletionChunkChoiceSchema = z.object({
   delta: z.object({
     role: openAiRoleSchema.optional(),
     content: z.string().nullable().optional(),
+    reasoning_content: z.string().nullable().optional(),
     tool_calls: z.array(openAiToolCallSchema).optional(),
   }),
 });
@@ -139,3 +171,5 @@ export type OpenAiModelCard = z.infer<typeof openAiModelCardSchema>;
 export type OpenAiModelList = z.infer<typeof openAiModelListSchema>;
 export type OpenAiErrorResponse = z.infer<typeof openAiErrorResponseSchema>;
 export type OpenAiToolCall = z.infer<typeof openAiToolCallSchema>;
+export type OpenAiMessageContent = z.infer<typeof openAiMessageContentSchema>;
+export type OpenAiMessageContentPart = z.infer<typeof openAiMessageContentPartSchema>;

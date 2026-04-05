@@ -14,9 +14,15 @@ export class EngineVersionsRepository {
     this.#database = database;
   }
 
-  upsert(record: EngineVersionRecord): void {
+  upsert(record: EngineVersionRecord): string {
     const parsed = engineVersionRecordSchema.parse(record);
+    const existingRow = this.#database
+      .prepare("SELECT id FROM engine_versions WHERE binary_path = ?")
+      .get(parsed.binaryPath) as { id: string } | undefined;
+    const targetId = existingRow?.id ?? parsed.id;
 
+    // Keep one row per binary path so repeated resolves refresh the existing
+    // engine record instead of tripping the UNIQUE constraint.
     this.#database
       .prepare(
         `
@@ -42,7 +48,7 @@ export class EngineVersionsRepository {
         `,
       )
       .run(
-        parsed.id,
+        targetId,
         parsed.engineType,
         parsed.versionTag,
         parsed.binaryPath,
@@ -51,6 +57,8 @@ export class EngineVersionsRepository {
         parsed.compatibilityNotes ?? null,
         parsed.installedAt,
       );
+
+    return targetId;
   }
 
   list(): EngineVersionRecord[] {
@@ -79,6 +87,14 @@ export class EngineVersionsRepository {
         installedAt: row.installed_at,
       }),
     );
+  }
+
+  findById(id: string): EngineVersionRecord | undefined {
+    return this.list().find((record) => record.id === id);
+  }
+
+  findActive(engineType: string): EngineVersionRecord | undefined {
+    return this.list().find((record) => record.engineType === engineType && record.isActive);
   }
 
   setActive(engineType: string, id: string): void {

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   type EngineAdapter,
+  type EngineActivationResult,
   type EngineHealthCheck,
   type EngineInstallResult,
   type EngineProbeResult,
@@ -26,11 +27,16 @@ import type {
 } from "@localhub/shared-contracts/foundation-models";
 import type { RuntimeKey } from "@localhub/shared-contracts/foundation-runtime";
 
+import {
+  getInstalledPackagedLlamaCppBinary,
+  restorePackagedLlamaCppBinary,
+} from "./binary-installer.js";
 import { buildFakeLlamaCppWorkerProgram, createLlamaCppHarness } from "./fake-worker.js";
 
 export * from "./fixtures.js";
 export * from "./download-manager.js";
 export * from "./gguf.js";
+export * from "./binary-installer.js";
 export * from "./model-manager.js";
 export * from "./providers.js";
 export * from "./session.js";
@@ -146,6 +152,11 @@ function derivePort(runtimeKey: RuntimeKey, basePort: number): number {
   return basePort + (hashPortSeed(runtimeKeyToString(runtimeKey)) % 2_000);
 }
 
+function getMmprojPath(artifact: ModelArtifact): string | undefined {
+  const mmprojPath = artifact.metadata.metadata.mmprojPath;
+  return typeof mmprojPath === "string" && mmprojPath.length > 0 ? mmprojPath : undefined;
+}
+
 function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number): string[] {
   const args = [
     "--model",
@@ -165,6 +176,11 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
 
   if (input.runtimeKey.role === "embeddings") {
     args.push("--embedding");
+  }
+
+  const mmprojPath = getMmprojPath(input.artifact);
+  if (input.artifact.capabilities.vision && mmprojPath && existsSync(mmprojPath)) {
+    args.push("--mmproj", mmprojPath);
   }
 
   if (input.profile.promptCacheKey) {
@@ -243,8 +259,35 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     supportRootOverride?: string,
   ): Promise<EngineInstallResult> {
     const { paths, registry } = loadRegistry(supportRootOverride);
-    const installPath = path.join(paths.versionsRoot, sanitizeVersionTag(versionTag));
+    const supportRoot = supportRootOverride ?? options.supportRoot ?? process.cwd();
+    const sanitizedVersionTag = sanitizeVersionTag(versionTag);
+    const installPath = path.join(paths.versionsRoot, sanitizedVersionTag);
     const manifestPath = path.join(installPath, "manifest.json");
+
+    const installedBinary = await getInstalledPackagedLlamaCppBinary(paths.supportRoot, sanitizedVersionTag);
+    if (installedBinary) {
+      return installedBinary;
+    }
+
+    const restoredBinary = await restorePackagedLlamaCppBinary({
+      supportRoot,
+      versionTag: sanitizedVersionTag,
+      platform: process.platform,
+      arch: process.arch,
+    }).catch(() => undefined);
+    if (restoredBinary) {
+      return restoredBinary;
+    }
+
+    const registeredVersion = registry.versions.find(
+      (candidate) => candidate.versionTag === sanitizedVersionTag,
+    );
+    if (registeredVersion) {
+      throw new Error(
+        `Registered llama.cpp version ${sanitizedVersionTag} is missing and could not be restored.`,
+      );
+    }
+
     const systemBinaryPath = findExecutableOnPath(LLAMA_CPP_BINARY_CANDIDATES, env);
     const useSystemBinary = Boolean(systemBinaryPath) && options.preferFakeWorker !== true;
     const managedBy = useSystemBinary ? "binary" : "fake-worker";
@@ -264,7 +307,7 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     mkdirSync(installPath, { recursive: true });
     writeManifest(manifestPath, {
       engineType: LLAMA_CPP_ENGINE_TYPE,
-      versionTag,
+      versionTag: sanitizedVersionTag,
       installPath,
       binaryPath,
       managedBy,
@@ -277,19 +320,19 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
       activateEngineVersion(
         upsertEngineVersionRecord(
           registry.engineType ? registry : createEmptyEngineVersionRegistry(LLAMA_CPP_ENGINE_TYPE),
-          toVersionRecord(versionTag, installPath, binaryPath, managedBy, notes),
+          toVersionRecord(sanitizedVersionTag, installPath, binaryPath, managedBy, notes),
         ),
-        versionTag,
+        sanitizedVersionTag,
       ),
     );
 
     return {
       success: true,
-      versionTag,
+      versionTag: sanitizedVersionTag,
       installPath,
       binaryPath,
       registryFile: paths.registryFile,
-      activated: nextRegistry.activeVersionTag === versionTag,
+      activated: nextRegistry.activeVersionTag === sanitizedVersionTag,
       notes,
     };
   }
@@ -316,6 +359,15 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
 
     if (!activeVersion) {
       const installResult = await ensureInstalledVersion(requestedVersion, input.supportRoot);
+      return {
+        versionTag: installResult.versionTag,
+        managedBy: installResult.binaryPath === process.execPath ? "fake-worker" : "binary",
+        binaryPath: installResult.binaryPath ?? process.execPath,
+      };
+    }
+
+    if (!existsSync(activeVersion.binaryPath)) {
+      const installResult = await ensureInstalledVersion(activeVersion.versionTag, input.supportRoot);
       return {
         versionTag: installResult.versionTag,
         managedBy: installResult.binaryPath === process.execPath ? "fake-worker" : "binary",
@@ -403,6 +455,48 @@ export function createLlamaCppAdapter(options: LlamaCppAdapterOptions = {}): Eng
     },
     async install(versionTag: string): Promise<EngineInstallResult> {
       return ensureInstalledVersion(versionTag);
+    },
+    async activate(
+      versionTag: string,
+      supportRootOverride?: string,
+    ): Promise<EngineActivationResult> {
+      const { paths, registry } = loadRegistry(supportRootOverride);
+      const existingVersion = registry.versions.find((candidate) => candidate.versionTag === versionTag);
+
+      if (!existingVersion) {
+        const installResult = await ensureInstalledVersion(versionTag, supportRootOverride);
+        return {
+          success: installResult.success,
+          versionTag: installResult.versionTag,
+          registryFile: installResult.registryFile,
+          ...(installResult.binaryPath ? { binaryPath: installResult.binaryPath } : {}),
+          notes: installResult.notes,
+        };
+      }
+
+      if (!existsSync(existingVersion.binaryPath)) {
+        const installResult = await ensureInstalledVersion(versionTag, supportRootOverride);
+        return {
+          success: installResult.success,
+          versionTag: installResult.versionTag,
+          registryFile: installResult.registryFile,
+          ...(installResult.binaryPath ? { binaryPath: installResult.binaryPath } : {}),
+          notes: installResult.notes,
+        };
+      }
+
+      const nextRegistry = writeEngineVersionRegistry(
+        paths.registryFile,
+        activateEngineVersion(registry, versionTag),
+      );
+
+      return {
+        success: nextRegistry.activeVersionTag === versionTag,
+        versionTag,
+        registryFile: paths.registryFile,
+        binaryPath: existingVersion.binaryPath,
+        notes: [`Activated installed llama.cpp version ${versionTag}.`, ...existingVersion.notes],
+      };
     },
     async resolveCommand(input: ResolveCommandInput): Promise<ResolvedCommand> {
       const { paths } = loadRegistry(input.supportRoot);

@@ -542,9 +542,9 @@ export class LlamaCppModelManager {
     const installResult = await this.#adapter.install(versionTag);
     const record = toEngineVersionRecord(installResult, this.#now());
     if (record && this.#engineVersionsRepository) {
-      this.#engineVersionsRepository.upsert(record);
+      const storedId = this.#engineVersionsRepository.upsert(record);
       if (record.isActive) {
-        this.#engineVersionsRepository.setActive(record.engineType, record.id);
+        this.#engineVersionsRepository.setActive(record.engineType, storedId);
       }
     }
 
@@ -563,8 +563,8 @@ export class LlamaCppModelManager {
     };
     const record = toEngineVersionRecord(installResult, this.#now());
     if (record && this.#engineVersionsRepository) {
-      this.#engineVersionsRepository.upsert(record);
-      this.#engineVersionsRepository.setActive(record.engineType, record.id);
+      const storedId = this.#engineVersionsRepository.upsert(record);
+      this.#engineVersionsRepository.setActive(record.engineType, storedId);
     }
 
     return installResult;
@@ -585,9 +585,9 @@ export class LlamaCppModelManager {
     if (this.#engineVersionsRepository) {
       const record = toEngineVersionRecord(installResult, this.#now());
       if (record) {
-        this.#engineVersionsRepository.upsert(record);
+        const storedId = this.#engineVersionsRepository.upsert(record);
         if (record.isActive) {
-          this.#engineVersionsRepository.setActive(record.engineType, record.id);
+          this.#engineVersionsRepository.setActive(record.engineType, storedId);
         }
       }
     }
@@ -608,9 +608,9 @@ export class LlamaCppModelManager {
     if (this.#engineVersionsRepository) {
       const record = toEngineVersionRecord(installResult, this.#now());
       if (record) {
-        this.#engineVersionsRepository.upsert(record);
+        const storedId = this.#engineVersionsRepository.upsert(record);
         if (record.isActive) {
-          this.#engineVersionsRepository.setActive(record.engineType, record.id);
+          this.#engineVersionsRepository.setActive(record.engineType, storedId);
         }
       }
     }

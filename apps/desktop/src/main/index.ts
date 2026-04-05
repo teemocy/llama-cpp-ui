@@ -86,6 +86,10 @@ gatewayManager.on("event", (event) => {
   relayToWindows(IPC_CHANNELS.gatewayEvent, event);
 });
 
+gatewayManager.on("chatStream", (event) => {
+  relayToWindows(IPC_CHANNELS.gatewayChatStream, event);
+});
+
 const createTrayIcon = () =>
   nativeImage.createFromDataURL(
     `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`

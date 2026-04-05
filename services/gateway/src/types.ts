@@ -1,6 +1,7 @@
 import type {
   ChatCompletionsRequest,
   ChatCompletionsResponse,
+  ChatSession,
   DesktopApiLogList,
   DesktopChatMessageList,
   DesktopChatRunRequest,
@@ -102,6 +103,14 @@ export interface ChatCompletionsStreamResult {
   contentType: string;
 }
 
+export interface DesktopChatRunStreamResult {
+  stream: ReadableStream<Uint8Array>;
+  contentType: string;
+  session: ChatSession;
+  userMessageId: string;
+  assistantMessageId: string;
+}
+
 export type GatewayEvent = SharedGatewayEvent;
 export type RuntimeEventRoute = RequestRoute;
 export type RuntimeEventTrace = RequestTrace;
@@ -141,6 +150,10 @@ export interface GatewayRuntime {
   ): MaybePromise<DesktopChatSessionList["data"][number]>;
   deleteChatSession(sessionId: string): MaybePromise<boolean>;
   runChat(input: DesktopChatRunRequest, traceId?: string): MaybePromise<DesktopChatRunResponse>;
+  runChatStream(
+    input: DesktopChatRunRequest,
+    traceId?: string,
+  ): MaybePromise<DesktopChatRunStreamResult>;
   listRecentApiLogs(limit?: number): MaybePromise<DesktopApiLogList>;
   searchCatalog(query: string): MaybePromise<DesktopProviderSearchResult>;
   getCatalogModel(

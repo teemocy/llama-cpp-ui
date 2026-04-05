@@ -7,8 +7,11 @@
     "build": "pnpm -r build",
     "clean": "node ./scripts/clean.mjs",
     "db:migrate": "tsx packages/db/src/cli/migrate.ts",
+    "db:migrate:plan": "tsx packages/db/src/cli/migrate.ts --plan",
     "format": "biome format --write .",
     "lint": "biome check .",
+    "package:desktop:macos": "node ./scripts/package-macos.mjs",
+    "notarize:desktop:macos": "node ./scripts/notarize-macos.mjs",
     "test": "vitest run",
     "typecheck": "pnpm -r typecheck",
     "validate": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"

@@ -1,4 +1,5 @@
 export * from "./migrations.js";
+export * from "./migration-safety.js";
 export * from "./retention.js";
 export * from "./request-trace-persistence.js";
 export * from "./sqlite.js";

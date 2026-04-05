@@ -112,6 +112,7 @@ const toModelSummary = (model: DesktopModelRecord): ModelSummary => ({
   state: model.state,
   sizeLabel: formatBytes(model.sizeBytes),
   tags: model.tags,
+  capabilities: model.capabilities,
   ...(model.contextLength !== undefined ? { contextLength: model.contextLength } : {}),
   description: describeModel(model),
   ...(model.lastUsedAt ? { lastUsedAt: model.lastUsedAt } : {}),
@@ -219,6 +220,7 @@ export function App() {
   }, [modelLibrary]);
 
   const modelSummaries = modelLibrary.map((model) => toModelSummary(model));
+  const chatModelSummaries = modelSummaries.filter((model) => model.capabilities.includes("chat"));
   const activeEngineCount = engines.filter((engine) => engine.active).length;
 
   const requestRefresh = () => {
@@ -444,10 +446,7 @@ export function App() {
               }
             />
             <Route path="/downloads" element={<DownloadsScreen shellState={shellState} />} />
-            <Route
-              path="/chat"
-              element={<ChatScreen models={modelSummaries} shellState={shellState} />}
-            />
+            <Route path="/chat" element={<ChatScreen models={chatModelSummaries} shellState={shellState} />} />
             <Route
               path="/observability"
               element={

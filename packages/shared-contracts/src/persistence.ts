@@ -7,7 +7,11 @@ import {
   nonEmptyStringSchema,
 } from "./common.js";
 import { capabilitySetSchema, engineTypeSchema, modelSourceKindSchema } from "./models.js";
-import { openAiRoleSchema, openAiToolCallSchema } from "./openai.js";
+import {
+  openAiMessageContentSchema,
+  openAiRoleSchema,
+  openAiToolCallSchema,
+} from "./openai.js";
 
 export const engineVersionRecordSchema = z.object({
   id: nonEmptyStringSchema,
@@ -49,7 +53,7 @@ export const chatMessageSchema = z.object({
   id: nonEmptyStringSchema,
   sessionId: nonEmptyStringSchema,
   role: openAiRoleSchema,
-  content: z.string().nullable(),
+  content: openAiMessageContentSchema.nullable(),
   toolCalls: z.array(openAiToolCallSchema).default([]),
   tokensCount: z.number().int().nonnegative().optional(),
   metadata: jsonRecordSchema.default({}),

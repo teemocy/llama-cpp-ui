@@ -1,26 +1,26 @@
 # Local LLM Hub Workspace
 
-This repository now starts from a buildable TypeScript monorepo foundation for the Local LLM Hub platform. The focus of this pass is Thread 1 ownership: workspace scaffolding, shared contracts, config and discovery conventions, SQLite migrations and repositories, and validation automation.
+This repository contains the Local LLM Hub desktop shell, gateway daemon, shared contracts, and runtime support packages. The current workspace supports a desktop-managed local LLM stack with model registration, downloads, chat persistence, observability, OpenAI-compatible public routes, and a loopback-only control plane.
 
 ## Workspace layout
 
-- `apps/desktop`: Electron shell scaffold owned by Desktop & UX.
-- `services/gateway`: Fastify gateway scaffold owned by Gateway & Runtime.
+- `apps/desktop`: Electron shell, preload bridge, and React renderer owned by Desktop & UX.
+- `services/gateway`: Fastify gateway, control plane, and runtime supervisor owned by Gateway & Runtime.
 - `packages/shared-contracts`: Shared Zod schemas and stable contract types.
 - `packages/platform`: Shared config, app-paths, discovery, logging, and security helpers.
 - `packages/db`: SQLite migration runner, repositories, fixtures, and retention utilities.
 - `packages/engine-core`: Stable runtime adapter interfaces.
-- `packages/engine-llama`: `llama.cpp` adapter placeholder built on the engine contract.
-- `packages/ui`: Shared desktop UI tokens and shell placeholders.
+- `packages/engine-llama`: `llama.cpp` model manager, download flows, and worker harness.
+- `packages/ui`: Shared desktop UI tokens and shell metadata.
 
 ## Getting started
 
 ```bash
 pnpm install
-pnpm build
-pnpm test
-pnpm db:migrate
+pnpm dev
 ```
+
+For a full setup, deployment, and user walkthrough, see [docs/design-deployment-user-guide.md](./docs/design-deployment-user-guide.md).
 
 ## Validation scripts
 
@@ -41,6 +41,13 @@ pnpm db:migrate
 
 The platform package resolves a deterministic dev layout inside `.local/local-llm-hub/dev` and a packaged layout inside the OS application support directory.
 
+## Documentation
+
+- [Design, Deployment, and User Guide](./docs/design-deployment-user-guide.md)
+- [Release Readiness](./docs/release-readiness.md)
+- [Config Precedence](./docs/config-precedence.md)
+- [Package Ownership](./docs/package-ownership.md)
+
 ## Governance
 
-Contract, schema, config, and package-boundary rules live in [docs/package-ownership.md](/Users/timocy/Tools/Antigravity/llama-cpp-ui/docs/package-ownership.md).
+Contract, schema, config, and package-boundary rules live in [docs/package-ownership.md](./docs/package-ownership.md).
