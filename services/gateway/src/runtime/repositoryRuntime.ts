@@ -22,8 +22,9 @@ import {
   createLlamaCppAdapter,
   createLlamaCppHarness,
 } from "@localhub/engine-llama";
-import { resolveAppPaths } from "@localhub/platform";
+import { classifyStderrLogLevel, resolveAppPaths } from "@localhub/platform";
 import {
+  type ChatCompletionsChunk,
   type ChatCompletionsRequest,
   type ChatCompletionsResponse,
   type DesktopApiLogList,
@@ -47,6 +48,8 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiToolCall,
+  chatCompletionsChunkSchema,
   chatCompletionsResponseSchema,
   desktopApiLogListSchema,
   desktopChatMessageListSchema,
@@ -79,6 +82,7 @@ import type {
 import {
   type ChatCompletionsStreamResult,
   type ControlHealthSnapshot,
+  type DesktopChatRunStreamResult,
   type DownloadTaskRecord,
   type EngineRecord,
   type EvictModelResult,
@@ -96,6 +100,12 @@ import {
   type RuntimeModelRecord,
   type WorkerState,
 } from "../types.js";
+import {
+  chatContentHasImages,
+  countChatContentTokens,
+  createChatSessionTitle,
+  formatChatContentSummary,
+} from "./chat-content.js";
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
@@ -121,6 +131,19 @@ const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
 const SHARD_SUFFIX_PATTERN = /^(.*?)-(\d{5})-of-(\d{5})$/i;
 const AUXILIARY_GGUF_PATTERN = /^mmproj(?:[-_.]|$)/i;
+
+interface StreamedAssistantAccumulator {
+  responseId?: string;
+  created?: number;
+  model?: string;
+  content: string;
+  reasoning: string;
+  finishReason: string | null;
+  toolCalls: OpenAiToolCall[];
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
 
 interface CatalogVariantArtifact {
   artifact: ProviderArtifactDescriptor;
@@ -548,22 +571,22 @@ function getArtifactStatus(artifact: ModelArtifact): "available" | "missing" {
   return existsSync(artifact.localPath) ? "available" : "missing";
 }
 
+function hasRuntimeAffectingModelConfigChanges(
+  input: DesktopModelConfigUpdateRequest,
+): boolean {
+  return (
+    input.defaultTtlMs !== undefined ||
+    input.contextLength !== undefined ||
+    input.gpuLayers !== undefined
+  );
+}
+
 function getMissingArtifactMessage(artifact: ModelArtifact): string {
   return `Local artifact is missing from ${artifact.localPath}.`;
 }
 
 function normalizeBaseUrl(healthUrl: string): string {
   return healthUrl.replace(/\/(?:healthz?|)+$/, "").replace(/\/+$/, "");
-}
-
-function countTextTokens(value: string): number {
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
-}
-
-function createSessionTitle(message: string): string {
-  const trimmed = message.replace(/\s+/g, " ").trim();
-  return trimmed.length <= 56 ? trimmed : `${trimmed.slice(0, 53).trimEnd()}...`;
 }
 
 function getChatUsage(response: ChatCompletionsResponse): {
@@ -584,6 +607,139 @@ function getChatUsage(response: ChatCompletionsResponse): {
   };
 }
 
+function countTextTokens(value: string | string[]): number {
+  const text = Array.isArray(value) ? value.join(" ") : value;
+  const trimmed = text.trim();
+  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
+}
+
+function requestRequiresVision(messages: ChatCompletionsRequest["messages"]): boolean {
+  return messages.some((message) => chatContentHasImages(message.content));
+}
+
+function normalizeAssistantContent(content: unknown): ChatMessage["content"] {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (content === null || content === undefined) {
+    return null;
+  }
+
+  if (Array.isArray(content)) {
+    return content as ChatMessage["content"];
+  }
+
+  return JSON.stringify(content);
+}
+
+function getReasoningContent(
+  message:
+    | {
+        reasoning_content?: string | null | undefined;
+      }
+    | undefined,
+): string | undefined {
+  if (typeof message?.reasoning_content !== "string") {
+    return undefined;
+  }
+
+  return message.reasoning_content.length > 0 ? message.reasoning_content : undefined;
+}
+
+function buildAssistantMetadata(options: {
+  reasoningContent?: string | undefined;
+  finishReason?: string | null | undefined;
+}): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+
+  if (options.reasoningContent && options.reasoningContent.length > 0) {
+    metadata.reasoningContent = options.reasoningContent;
+  }
+
+  if (options.finishReason) {
+    metadata.finishReason = options.finishReason;
+  }
+
+  return metadata;
+}
+
+function createStreamedAssistantAccumulator(): StreamedAssistantAccumulator {
+  return {
+    content: "",
+    reasoning: "",
+    finishReason: null,
+    toolCalls: [],
+  };
+}
+
+function applyChunkToAccumulator(
+  accumulator: StreamedAssistantAccumulator,
+  chunk: ChatCompletionsChunk,
+): void {
+  accumulator.responseId ??= chunk.id;
+  accumulator.created ??= chunk.created;
+  accumulator.model ??= chunk.model;
+
+  const choice = chunk.choices[0];
+  if (!choice) {
+    return;
+  }
+
+  if (typeof choice.delta.content === "string" && choice.delta.content.length > 0) {
+    accumulator.content += choice.delta.content;
+  }
+
+  if (
+    typeof choice.delta.reasoning_content === "string" &&
+    choice.delta.reasoning_content.length > 0
+  ) {
+    accumulator.reasoning += choice.delta.reasoning_content;
+  }
+
+  if (choice.delta.tool_calls?.length) {
+    accumulator.toolCalls = choice.delta.tool_calls;
+  }
+
+  if (choice.finish_reason !== undefined) {
+    accumulator.finishReason = choice.finish_reason ?? accumulator.finishReason;
+  }
+
+  if (chunk.usage?.prompt_tokens !== undefined) {
+    accumulator.promptTokens = chunk.usage.prompt_tokens;
+  }
+  if (chunk.usage?.completion_tokens !== undefined) {
+    accumulator.completionTokens = chunk.usage.completion_tokens;
+  }
+  if (chunk.usage?.total_tokens !== undefined) {
+    accumulator.totalTokens = chunk.usage.total_tokens;
+  }
+}
+
+function drainSseBuffer(buffer: string, onData: (data: string) => void): string {
+  let normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  while (true) {
+    const boundaryIndex = normalized.indexOf("\n\n");
+    if (boundaryIndex < 0) {
+      return normalized;
+    }
+
+    const rawEvent = normalized.slice(0, boundaryIndex);
+    normalized = normalized.slice(boundaryIndex + 2);
+
+    const data = rawEvent
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+
+    if (data.length > 0) {
+      onData(data);
+    }
+  }
+}
+
 function createFakeCompletionId(prefix: string, traceId: string): string {
   return `${prefix}-${traceId.replace(/[^A-Za-z0-9]+/g, "").slice(0, 12) || randomUUID().slice(0, 12)}`;
 }
@@ -594,11 +750,8 @@ function createFakeChatCompletionResponse(
 ): ChatCompletionsResponse {
   const created = Math.floor(Date.now() / 1000);
   const lastUserMessage = [...input.messages].reverse().find((message) => message.role === "user");
-  const userContent =
-    typeof lastUserMessage?.content === "string"
-      ? lastUserMessage.content
-      : JSON.stringify(lastUserMessage?.content ?? "");
-  const promptTokens = countTextTokens(userContent);
+  const userContent = formatChatContentSummary(lastUserMessage?.content ?? "");
+  const promptTokens = countChatContentTokens(lastUserMessage?.content ?? "");
 
   if (input.tools?.length) {
     return {
@@ -635,7 +788,7 @@ function createFakeChatCompletionResponse(
   }
 
   const answer = `Fake response from ${input.model}: ${userContent || "Hello from fake llama.cpp"}`;
-  const completionTokens = countTextTokens(answer);
+  const completionTokens = countChatContentTokens(answer);
 
   return {
     id: createFakeCompletionId("chatcmpl", traceId),
@@ -908,6 +1061,7 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "POST /control/chat/sessions":
     case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
+    case "POST /control/chat/run/stream":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
@@ -1251,7 +1405,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       role: "user",
       content: input.message,
       toolCalls: [],
-      tokensCount: countTextTokens(input.message),
+      tokensCount: countChatContentTokens(input.message),
       metadata: {},
       createdAt: now,
     };
@@ -1261,6 +1415,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: false,
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
         messages: [
           ...(session.systemPrompt
             ? [{ role: "system" as const, content: session.systemPrompt }]
@@ -1277,17 +1432,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     );
 
     const assistantContent = completion.choices[0]?.message.content;
+    const reasoningContent = getReasoningContent(completion.choices[0]?.message);
+    const finishReason = completion.choices[0]?.finish_reason;
     const assistantMessage: ChatMessage = {
       id: `message_${randomUUID().slice(0, 12)}`,
       sessionId: session.id,
       role: "assistant",
-      content:
-        typeof assistantContent === "string"
-          ? assistantContent
-          : JSON.stringify(assistantContent ?? ""),
+      content: normalizeAssistantContent(assistantContent),
       toolCalls: completion.choices[0]?.message.tool_calls ?? [],
       tokensCount: completion.usage?.completion_tokens,
-      metadata: {},
+      metadata: buildAssistantMetadata({
+        reasoningContent,
+        finishReason,
+      }),
       createdAt: nowIso(),
     };
     this.#chatRepository.appendMessage(assistantMessage);
@@ -1296,7 +1453,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       id: session.id,
       modelId: input.model,
       ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
-      ...(session.title ? { title: session.title } : { title: createSessionTitle(input.message) }),
+      ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
     });
 
     return desktopChatRunResponseSchema.parse({
@@ -1305,6 +1462,146 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       assistantMessage,
       response: completion,
     });
+  }
+
+  async runChatStream(
+    input: DesktopChatRunRequest,
+    traceId?: string,
+  ): Promise<DesktopChatRunStreamResult> {
+    const now = nowIso();
+    const normalizedTraceId = normalizeTraceId(traceId);
+    const session = this.upsertChatSession({
+      ...(input.sessionId ? { id: input.sessionId } : {}),
+      modelId: input.model,
+      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+    });
+    const userMessage: ChatMessage = {
+      id: `message_${randomUUID().slice(0, 12)}`,
+      sessionId: session.id,
+      role: "user",
+      content: input.message,
+      toolCalls: [],
+      tokensCount: countChatContentTokens(input.message),
+      metadata: {},
+      createdAt: now,
+    };
+    this.#chatRepository.appendMessage(userMessage);
+
+    const assistantMessageId = `message_${randomUUID().slice(0, 12)}`;
+    const accumulator = createStreamedAssistantAccumulator();
+    const completionStream = await this.createChatCompletionStream(
+      {
+        model: input.model,
+        stream: true,
+        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
+        messages: [
+          ...(session.systemPrompt
+            ? [{ role: "system" as const, content: session.systemPrompt }]
+            : []),
+          ...this.#chatRepository.listMessages(session.id).map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+        ],
+      },
+      {
+        traceId: normalizedTraceId,
+      },
+    );
+
+    let finalized = false;
+    const persistAssistantMessage = (): void => {
+      if (finalized) {
+        return;
+      }
+
+      finalized = true;
+      const assistantMessage: ChatMessage = {
+        id: assistantMessageId,
+        sessionId: session.id,
+        role: "assistant",
+        content: accumulator.content.length > 0 ? accumulator.content : null,
+        toolCalls: accumulator.toolCalls,
+        tokensCount: accumulator.completionTokens,
+        metadata: buildAssistantMetadata({
+          reasoningContent: accumulator.reasoning,
+          finishReason: accumulator.finishReason,
+        }),
+        createdAt: nowIso(),
+      };
+      this.#chatRepository.appendMessage(assistantMessage);
+      this.upsertChatSession({
+        id: session.id,
+        modelId: input.model,
+        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+      });
+    };
+
+    const reader = completionStream.stream.getReader();
+    const decoder = new TextDecoder();
+
+    return {
+      contentType: completionStream.contentType,
+      session,
+      userMessageId: userMessage.id,
+      assistantMessageId,
+      stream: new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          let sseBuffer = "";
+
+          void (async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  break;
+                }
+
+                sseBuffer += decoder.decode(value, { stream: true });
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(JSON.parse(data));
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+
+                controller.enqueue(value);
+              }
+
+              const remaining = decoder.decode();
+              if (remaining.length > 0) {
+                sseBuffer += remaining;
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(JSON.parse(data));
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+              }
+
+              persistAssistantMessage();
+              controller.close();
+            } catch (error) {
+              controller.error(error);
+            } finally {
+              reader.releaseLock();
+            }
+          })();
+        },
+        cancel: async (reason) => {
+          await reader.cancel(reason).catch(() => undefined);
+        },
+      }),
+    };
   }
 
   listRecentApiLogs(limit = 30): DesktopApiLogList {
@@ -1511,7 +1808,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
 
-    if (this.#workers.has(resolved.runtimeKeyString)) {
+    if (hasRuntimeAffectingModelConfigChanges(input) && this.#workers.has(resolved.runtimeKeyString)) {
       throw new GatewayRequestError(
         "model_config_requires_cold_state",
         "Evict the model from memory before changing advanced runtime settings.",
@@ -1619,7 +1916,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     input: ChatCompletionsRequest,
     context: GatewayExecutionContext,
   ): Promise<ChatCompletionsResponse> {
-    const worker = await this.acquireWorkerForRequest(input.model, "chat", context.traceId);
+    const worker = await this.acquireWorkerForRequest(
+      input.model,
+      "chat",
+      context.traceId,
+      requestRequiresVision(input.messages),
+    );
     const startedAt = Date.now();
 
     try {
@@ -1667,7 +1969,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     input: ChatCompletionsRequest,
     context: GatewayExecutionContext,
   ): Promise<ChatCompletionsStreamResult> {
-    const worker = await this.acquireWorkerForRequest(input.model, "chat", context.traceId);
+    const worker = await this.acquireWorkerForRequest(
+      input.model,
+      "chat",
+      context.traceId,
+      requestRequiresVision(input.messages),
+    );
     const startedAt = Date.now();
     let firstChunkAt: number | undefined;
     let settled = false;
@@ -1806,9 +2113,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         modelId: input.model,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
-        promptTokens: countTextTokens(
-          Array.isArray(input.input) ? input.input.join(" ") : input.input,
-        ),
+        promptTokens: countTextTokens(input.input),
         totalDurationMs: Date.now() - startedAt,
         statusCode: response.status,
         createdAt: nowIso(),
@@ -1943,7 +2248,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private ensureModelCapability(
     resolved: ResolvedModelRecord,
-    capability: "chat" | "embeddings",
+    capability: "chat" | "embeddings" | "vision",
   ): void {
     if (!resolved.artifact.capabilities[capability]) {
       throw new GatewayRequestError(
@@ -1956,12 +2261,16 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async acquireWorkerForRequest(
     modelId: string,
-    capability: "chat" | "embeddings",
+    capability: "chat" | "embeddings" | "vision",
     traceId: string,
+    requiresVision = false,
   ): Promise<ManagedWorker> {
     this.assertAcceptingNewWork();
     const resolved = this.resolveModelRecord(modelId);
     this.ensureModelCapability(resolved, capability);
+    if (requiresVision) {
+      this.ensureModelCapability(resolved, "vision");
+    }
     await this.preloadModel(modelId, traceId);
 
     const worker = this.#workers.get(resolved.runtimeKeyString);
@@ -2496,7 +2805,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   private attachWorkerLogging(worker: ManagedWorker): void {
     const attach = (
       stream: NodeJS.ReadableStream,
-      level: "info" | "error",
+      streamName: "stdout" | "stderr",
       source: "worker" | "system",
     ) => {
       const reader = createInterface({ input: stream });
@@ -2508,7 +2817,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         }
 
         let message = trimmed;
-        let resolvedLevel = level as "debug" | "info" | "warn" | "error";
+        let resolvedLevel: "debug" | "info" | "warn" | "error" =
+          streamName === "stderr" ? classifyStderrLogLevel(trimmed) : "info";
 
         try {
           const parsed = JSON.parse(trimmed) as {
@@ -2516,7 +2826,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
             phase?: string;
             reason?: string;
           };
-          resolvedLevel = parsed.level ?? level;
+          resolvedLevel = parsed.level ?? resolvedLevel;
           message = parsed.phase
             ? parsed.reason
               ? `${parsed.phase}: ${parsed.reason}`
@@ -2534,8 +2844,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       });
     };
 
-    attach(worker.harness.child.stdout, "info", "worker");
-    attach(worker.harness.child.stderr, "error", "worker");
+    attach(worker.harness.child.stdout, "stdout", "worker");
+    attach(worker.harness.child.stderr, "stderr", "worker");
   }
 
   private attachWorkerExitListener(worker: ManagedWorker): void {
@@ -2583,7 +2893,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }): void {
     const versionTag = command.versionTag ?? "stage2-runtime";
 
-    this.#enginesRepository.upsert({
+    const storedId = this.#enginesRepository.upsert({
       id: `${DEFAULT_ENGINE_TYPE}:${versionTag}`,
       engineType: DEFAULT_ENGINE_TYPE,
       versionTag,
@@ -2596,7 +2906,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           : "Using a resolved llama.cpp binary.",
       installedAt: nowIso(),
     });
-    this.#enginesRepository.setActive(DEFAULT_ENGINE_TYPE, `${DEFAULT_ENGINE_TYPE}:${versionTag}`);
+    this.#enginesRepository.setActive(DEFAULT_ENGINE_TYPE, storedId);
   }
 
   private createModelStateEvent(

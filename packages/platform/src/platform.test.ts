@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ensureAppPaths, resolveAppPaths } from "./app-paths.js";
 import { loadGatewayConfig, writeConfigFile } from "./config.js";
 import { readGatewayDiscoveryFile, writeGatewayDiscoveryFile } from "./discovery.js";
+import { classifyStderrLogLevel } from "./log-stream.js";
 import { createLogger } from "./logger.js";
 import { createApiTokenRecord, verifyBearerToken } from "./security.js";
 
@@ -121,6 +122,18 @@ describe("platform helpers", () => {
 
     expect(entries).toHaveLength(1);
     expect(JSON.stringify(entries[0])).toContain("[redacted]");
+  });
+
+  it("classifies common stderr diagnostics without promoting them to errors", () => {
+    expect(classifyStderrLogLevel("ggml_metal_free: deallocating")).toBe("info");
+    expect(
+      classifyStderrLogLevel(
+        "llama_memory_breakdown_print: | memory breakdown [MiB] | total free self model context compute unaccounted |",
+      ),
+    ).toBe("info");
+    expect(classifyStderrLogLevel("srv operator(): cleaning up before exit...")).toBe("info");
+    expect(classifyStderrLogLevel("Warning: model cache is stale")).toBe("warn");
+    expect(classifyStderrLogLevel("Fatal error: worker crashed")).toBe("error");
   });
 
   it("hashes and verifies bearer tokens", () => {

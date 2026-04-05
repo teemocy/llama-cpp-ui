@@ -6,9 +6,15 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import type { Readable } from "node:stream";
-import { readGatewayDiscoveryFile, resolveAppPaths } from "@localhub/platform";
 import {
+  classifyStderrLogLevel,
+  readGatewayDiscoveryFile,
+  resolveAppPaths,
+} from "@localhub/platform";
+import {
+  type DesktopChatStreamEvent,
   type DesktopApiLogList,
+  type OpenAiToolCall,
   type DesktopChatMessageList,
   type DesktopChatRunRequest,
   type DesktopChatRunResponse,
@@ -34,6 +40,7 @@ import {
   type GatewayHealthSnapshot,
   type PublicModelList,
   type RequestRoute,
+  chatCompletionsChunkSchema,
   chatSessionSchema,
   desktopApiLogListSchema,
   desktopChatMessageListSchema,
@@ -58,6 +65,7 @@ import WebSocket, { type RawData } from "ws";
 type GatewayManagerEvents = {
   state: (state: DesktopShellState) => void;
   event: (event: GatewayEvent) => void;
+  chatStream: (event: DesktopChatStreamEvent) => void;
 };
 
 type GatewayLaunchCommand = {
@@ -101,6 +109,16 @@ const DEFAULT_GATEWAY_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
 const DEFAULT_GATEWAY_TERM_EXIT_TIMEOUT_MS = 2_000;
 const DEFAULT_GATEWAY_KILL_EXIT_TIMEOUT_MS = 1_000;
 const DEFAULT_GATEWAY_DISCOVERY_TIMEOUT_MS = 5 * 60_000;
+
+interface StreamedChatAccumulator {
+  responseId?: string;
+  created?: number;
+  model?: string;
+  content: string;
+  reasoning: string;
+  finishReason: string | null;
+  toolCalls: OpenAiToolCall[];
+}
 
 const resolveGatewayEntrypoint = (workspaceRoot: string): string => {
   const candidatePaths = [
@@ -280,6 +298,7 @@ const toModelSummary = (model: DesktopModelRecord): PublicModelList["data"][numb
   state: model.state,
   sizeLabel: formatBytes(model.sizeBytes),
   tags: model.tags,
+  capabilities: model.capabilities,
   ...(model.contextLength !== undefined ? { contextLength: model.contextLength } : {}),
   description: describeModel(model),
   ...(model.lastUsedAt ? { lastUsedAt: model.lastUsedAt } : {}),
@@ -314,6 +333,7 @@ const mapRequestRoute = (method: string, pathName: string): RequestRoute | null 
     case "POST /control/chat/sessions":
     case "DELETE /control/chat/sessions/:id":
     case "POST /control/chat/run":
+    case "POST /control/chat/run/stream":
     case "GET /control/observability/api-logs":
     case "POST /control/system/shutdown":
     case "GET /control/downloads":
@@ -367,6 +387,87 @@ const getErrorMessage = (value: unknown, fallback: string): string => {
   return typeof candidate.message === "string" && candidate.message.trim().length > 0
     ? candidate.message
     : fallback;
+};
+
+const getReasoningContent = (metadata: Record<string, unknown> | undefined): string | undefined =>
+  typeof metadata?.reasoningContent === "string" && metadata.reasoningContent.length > 0
+    ? metadata.reasoningContent
+    : undefined;
+
+const createStreamedChatAccumulator = (): StreamedChatAccumulator => ({
+  content: "",
+  reasoning: "",
+  finishReason: null,
+  toolCalls: [],
+});
+
+const applyChunkToAccumulator = (
+  accumulator: StreamedChatAccumulator,
+  chunk: {
+    id: string;
+    created: number;
+    model: string;
+    choices: Array<{
+      finish_reason?: string | null | undefined;
+      delta: {
+        content?: string | null | undefined;
+        reasoning_content?: string | null | undefined;
+        tool_calls?: OpenAiToolCall[] | undefined;
+      };
+    }>;
+  },
+): void => {
+  accumulator.responseId ??= chunk.id;
+  accumulator.created ??= chunk.created;
+  accumulator.model ??= chunk.model;
+
+  const choice = chunk.choices[0];
+  if (!choice) {
+    return;
+  }
+
+  if (typeof choice.delta.content === "string" && choice.delta.content.length > 0) {
+    accumulator.content += choice.delta.content;
+  }
+
+  if (
+    typeof choice.delta.reasoning_content === "string" &&
+    choice.delta.reasoning_content.length > 0
+  ) {
+    accumulator.reasoning += choice.delta.reasoning_content;
+  }
+
+  if (choice.delta.tool_calls?.length) {
+    accumulator.toolCalls = choice.delta.tool_calls;
+  }
+
+  if (choice.finish_reason !== undefined) {
+    accumulator.finishReason = choice.finish_reason ?? accumulator.finishReason;
+  }
+};
+
+const drainSseBuffer = (buffer: string, onData: (data: string) => void): string => {
+  let normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  while (true) {
+    const boundaryIndex = normalized.indexOf("\n\n");
+    if (boundaryIndex < 0) {
+      return normalized;
+    }
+
+    const rawEvent = normalized.slice(0, boundaryIndex);
+    normalized = normalized.slice(boundaryIndex + 2);
+
+    const data = rawEvent
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+
+    if (data.length > 0) {
+      onData(data);
+    }
+  }
 };
 
 export class GatewayManager extends EventEmitter {
@@ -684,18 +785,232 @@ export class GatewayManager extends EventEmitter {
 
   async runChat(input: DesktopChatRunRequest): Promise<DesktopChatRunResponse> {
     const discovery = this.requireDiscovery();
-    const payload = await this.readJsonResponse(
-      fetch(`${discovery.controlBaseUrl}/control/chat/run`, {
-        method: "POST",
-        headers: this.createControlHeaders({
-          "content-type": "application/json",
-        }),
-        body: JSON.stringify(input),
+    const clientRequestId = input.clientRequestId?.trim() || randomUUID();
+    const response = await fetch(`${discovery.controlBaseUrl}/control/chat/run/stream`, {
+      method: "POST",
+      headers: this.createControlHeaders({
+        "content-type": "application/json",
       }),
-      "Unable to run chat request.",
+      body: JSON.stringify({
+        ...input,
+        clientRequestId,
+      }),
+    });
+    const sessionId = response.headers.get("x-localhub-session-id") ?? input.sessionId ?? undefined;
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as unknown;
+      const errorMessage = getErrorMessage(payload, "Unable to run chat request.");
+      this.emit("chatStream", {
+        type: "error",
+        clientRequestId,
+        ...(sessionId ? { sessionId } : {}),
+        errorMessage,
+      });
+      throw new Error(errorMessage);
+    }
+
+    if (!sessionId) {
+      throw new Error("Unable to resolve the chat session for the streamed response.");
+    }
+
+    this.emit("chatStream", {
+      type: "start",
+      clientRequestId,
+      sessionId,
+    });
+
+    if (!response.body) {
+      const errorMessage = "The gateway did not provide a streaming response body.";
+      this.emit("chatStream", {
+        type: "error",
+        clientRequestId,
+        sessionId,
+        errorMessage,
+      });
+      throw new Error(errorMessage);
+    }
+
+    const accumulator = createStreamedChatAccumulator();
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+          if (data === "[DONE]") {
+            return;
+          }
+
+          let parsedJson: unknown;
+          try {
+            parsedJson = JSON.parse(data);
+          } catch {
+            return;
+          }
+
+          const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
+          if (!parsed.success) {
+            return;
+          }
+
+          applyChunkToAccumulator(accumulator, parsed.data);
+          const choice = parsed.data.choices[0];
+          if (!choice) {
+            return;
+          }
+
+          const contentDelta =
+            typeof choice.delta.content === "string" && choice.delta.content.length > 0
+              ? choice.delta.content
+              : undefined;
+          const reasoningDelta =
+            typeof choice.delta.reasoning_content === "string" &&
+            choice.delta.reasoning_content.length > 0
+              ? choice.delta.reasoning_content
+              : undefined;
+          const toolCalls = choice.delta.tool_calls?.length ? choice.delta.tool_calls : undefined;
+
+          if (!contentDelta && !reasoningDelta && !toolCalls) {
+            return;
+          }
+
+          this.emit("chatStream", {
+            type: "delta",
+            clientRequestId,
+            sessionId,
+            ...(contentDelta ? { contentDelta } : {}),
+            ...(reasoningDelta ? { reasoningDelta } : {}),
+            ...(toolCalls ? { toolCalls } : {}),
+          });
+        });
+      }
+
+      const remaining = decoder.decode();
+      if (remaining.length > 0) {
+        sseBuffer += remaining;
+        sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+          if (data === "[DONE]") {
+            return;
+          }
+
+          let parsedJson: unknown;
+          try {
+            parsedJson = JSON.parse(data);
+          } catch {
+            return;
+          }
+
+          const parsed = chatCompletionsChunkSchema.safeParse(parsedJson);
+          if (parsed.success) {
+            applyChunkToAccumulator(accumulator, parsed.data);
+          }
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unable to read the chat stream.";
+      this.emit("chatStream", {
+        type: "error",
+        clientRequestId,
+        sessionId,
+        errorMessage,
+      });
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+
+    this.emit("chatStream", {
+      type: "done",
+      clientRequestId,
+      sessionId,
+    });
+
+    const [sessions, messages] = await Promise.all([
+      this.listChatSessions(),
+      this.listChatMessages(sessionId),
+    ]);
+    const userMessageId = response.headers.get("x-localhub-user-message-id") ?? undefined;
+    const assistantMessageId = response.headers.get("x-localhub-assistant-message-id") ?? undefined;
+    const session =
+      sessions.data.find((candidate) => candidate.id === sessionId) ??
+      chatSessionSchema.parse({
+        id: sessionId,
+        modelId: input.model,
+        ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        metadata: {},
+      });
+    const userMessage =
+      (userMessageId
+        ? messages.data.find((message) => message.id === userMessageId)
+        : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "user") ??
+      {
+        id: userMessageId ?? `message_${clientRequestId}`,
+        sessionId,
+        role: "user" as const,
+        content: input.message,
+        toolCalls: [],
+        metadata: {},
+        createdAt: new Date().toISOString(),
+      };
+    const assistantMessage =
+      (assistantMessageId
+        ? messages.data.find((message) => message.id === assistantMessageId)
+        : undefined) ??
+      [...messages.data].reverse().find((message) => message.role === "assistant") ??
+      {
+        id: assistantMessageId ?? `message_${clientRequestId}-assistant`,
+        sessionId,
+        role: "assistant" as const,
+        content: accumulator.content.length > 0 ? accumulator.content : null,
+        toolCalls: accumulator.toolCalls,
+        metadata:
+          accumulator.reasoning.length > 0
+            ? {
+                reasoningContent: accumulator.reasoning,
+              }
+            : {},
+        createdAt: new Date().toISOString(),
+      };
+    const reasoningContent = getReasoningContent(
+      assistantMessage.metadata as Record<string, unknown> | undefined,
     );
 
-    return desktopChatRunResponseSchema.parse(payload);
+    return desktopChatRunResponseSchema.parse({
+      session,
+      userMessage,
+      assistantMessage,
+      response: {
+        id: accumulator.responseId ?? `chatcmpl-${clientRequestId}`,
+        object: "chat.completion",
+        created: accumulator.created ?? Math.floor(Date.now() / 1000),
+        model: accumulator.model ?? input.model,
+        choices: [
+          {
+            index: 0,
+            finish_reason: accumulator.finishReason,
+            message: {
+              role: "assistant",
+              content: assistantMessage.content,
+              ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+              ...(assistantMessage.toolCalls.length > 0
+                ? { tool_calls: assistantMessage.toolCalls }
+                : {}),
+            },
+          },
+        ],
+      },
+    });
   }
 
   async listApiLogs(limit = 30): Promise<DesktopApiLogList> {
@@ -896,7 +1211,7 @@ export class GatewayManager extends EventEmitter {
     if (launch.useElectronRunAsNode) {
       childEnv.ELECTRON_RUN_AS_NODE = "1";
     } else {
-      delete childEnv.ELECTRON_RUN_AS_NODE;
+      childEnv.ELECTRON_RUN_AS_NODE = undefined;
     }
 
     return spawn(launch.command, [gatewayEntry], {
@@ -907,7 +1222,11 @@ export class GatewayManager extends EventEmitter {
   }
 
   private attachProcessLogging(child: ChildProcessByStdio<null, Readable, Readable>): void {
-    const emitLog = (sourceLabel: string, level: "info" | "error", chunk: Buffer) => {
+    const emitLog = (
+      sourceLabel: string,
+      streamName: "stdout" | "stderr",
+      chunk: Buffer,
+    ) => {
       const lines = chunk
         .toString("utf8")
         .split("\n")
@@ -915,6 +1234,8 @@ export class GatewayManager extends EventEmitter {
         .filter(Boolean);
 
       for (const message of lines) {
+        const level = streamName === "stderr" ? classifyStderrLogLevel(message) : "info";
+
         this.emitEvent({
           type: "LOG_STREAM",
           ts: new Date().toISOString(),
@@ -930,11 +1251,11 @@ export class GatewayManager extends EventEmitter {
     };
 
     child.stdout.on("data", (chunk: Buffer) => {
-      emitLog("gateway", "info", chunk);
+      emitLog("gateway", "stdout", chunk);
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
-      emitLog("gateway", "error", chunk);
+      emitLog("gateway", "stderr", chunk);
     });
   }
 
