@@ -482,7 +482,7 @@ select {
 
 .models-stage-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.92fr) minmax(0, 1.08fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -493,8 +493,7 @@ select {
   align-items: flex-start;
 }
 
-.library-panel,
-.detail-panel {
+.library-panel {
   min-height: 100%;
 }
 

@@ -49,20 +49,16 @@ type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
 
 type ModelDetailTab = "details" | "config";
 
-type FeedbackState =
-  | {
-      tone: "success" | "error";
-      text: string;
-    }
-  | null;
+type FeedbackState = {
+  tone: "success" | "error";
+  text: string;
+} | null;
 
-type EngineFeedbackState =
-  | {
-      tone: "success" | "error";
-      title: string;
-      text: string;
-    }
-  | null;
+type EngineFeedbackState = {
+  tone: "success" | "error";
+  title: string;
+  text: string;
+} | null;
 
 const formatBytes = (value: number): string => {
   if (value <= 0) {
@@ -105,10 +101,7 @@ const formatTtl = (value: number): string => {
 };
 
 const humanize = (value: string): string =>
-  value
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
 
 const describeModel = (model: DesktopModelRecord): string => {
   const facets = [model.role, model.format, model.architecture, model.quantization]
@@ -210,10 +203,13 @@ const getCapabilityToggleValue = (
 const createCapabilityDraft = (
   overrides: DesktopModelRecord["capabilityOverrides"],
 ): Record<CapabilityKey, CapabilityToggleValue> =>
-  capabilityDefinitions.reduce((draft, { key }) => {
-    draft[key] = getCapabilityToggleValue(overrides, key);
-    return draft;
-  }, {} as Record<CapabilityKey, CapabilityToggleValue>);
+  capabilityDefinitions.reduce(
+    (draft, { key }) => {
+      draft[key] = getCapabilityToggleValue(overrides, key);
+      return draft;
+    },
+    {} as Record<CapabilityKey, CapabilityToggleValue>,
+  );
 
 const toCapabilityOverrides = (
   draft: Record<CapabilityKey, CapabilityToggleValue>,
@@ -283,9 +279,11 @@ export function ModelsScreen({
     (selectedModelId ? models.find((model) => model.id === selectedModelId) : undefined) ??
     models[0];
   const connected = shellState.phase === "connected";
-  const activeEngineVersionTag = engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
+  const activeEngineVersionTag =
+    engines.find((engine) => engine.active)?.version ?? engines[0]?.version ?? null;
   const selectedEngineVersion =
-    selectedEngineVersionTag && engines.some((engine) => engine.version === selectedEngineVersionTag)
+    selectedEngineVersionTag &&
+    engines.some((engine) => engine.version === selectedEngineVersionTag)
       ? selectedEngineVersionTag
       : activeEngineVersionTag;
   const canRegister = connected && Boolean(importFilePath) && !pendingImport;
@@ -600,7 +598,10 @@ export function ModelsScreen({
     setFeedback(null);
 
     try {
-      const defaultTtlMinutes = Math.max(1, Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15);
+      const defaultTtlMinutes = Math.max(
+        1,
+        Number.parseInt(configDraft.defaultTtlMinutes, 10) || 15,
+      );
       const result = await onUpdateModelConfig(selectedModel.id, {
         pinned: configDraft.pinned,
         defaultTtlMs: defaultTtlMinutes * 60_000,
@@ -684,19 +685,29 @@ export function ModelsScreen({
               <span className="section-label">Registered models</span>
               <h3>Inventory</h3>
             </div>
-            <p>{connected ? "Select a model to inspect runtime and artifact details." : shellState.message}</p>
+            <p>
+              {connected
+                ? "Select a model to inspect runtime and artifact details."
+                : shellState.message}
+            </p>
           </div>
 
           {models.length === 0 ? (
             <div className="empty-panel">
               <strong>No local models registered yet.</strong>
-              <p>Pick a GGUF and register it to unlock the runtime detail view and preload controls.</p>
+              <p>
+                Pick a GGUF and register it to unlock the runtime detail view and preload controls.
+              </p>
             </div>
           ) : (
             <div className="model-list">
               {models.map((model) => (
                 <button
-                  className={model.id === selectedModel?.id ? "model-list-item model-list-item-active" : "model-list-item"}
+                  className={
+                    model.id === selectedModel?.id
+                      ? "model-list-item model-list-item-active"
+                      : "model-list-item"
+                  }
                   key={model.id}
                   onClick={() => openModelDetail(model.id)}
                   type="button"
@@ -706,7 +717,9 @@ export function ModelsScreen({
                       <span className="section-label">{model.engineType}</span>
                       <h4>{model.displayName}</h4>
                     </div>
-                    <span className={`status-pill ${getStateToneClass(model.state)}`}>{humanize(model.state)}</span>
+                    <span className={`status-pill ${getStateToneClass(model.state)}`}>
+                      {humanize(model.state)}
+                    </span>
                   </div>
                   <p>{describeModel(model)}</p>
                   <dl className="meta-grid compact-meta-grid">
@@ -732,40 +745,10 @@ export function ModelsScreen({
             </div>
           )}
         </article>
-
-        <article className="wide-card detail-panel">
-          {selectedModel ? (
-            <>
-              <div className="panel-header">
-                <div>
-                  <span className="section-label">Model popup</span>
-                  <h3>{selectedModel.displayName}</h3>
-                </div>
-                <button className="primary-button" onClick={() => openModelDetail(selectedModel.id)} type="button">
-                  Open popup
-                </button>
-              </div>
-
-              <p>
-                The popup contains the full model detail view, runtime controls, and config
-                overrides in separate tabs.
-              </p>
-            </>
-          ) : (
-            <div className="empty-panel">
-              <strong>Select a registered model.</strong>
-              <p>The popup will surface GGUF metadata, engine information, and lifecycle actions.</p>
-            </div>
-          )}
-        </article>
       </div>
 
       {selectedModel && isDetailModalOpen ? (
-        <div
-          className="model-detail-modal-backdrop"
-          onClick={closeModelDetail}
-          role="presentation"
-        >
+        <div className="model-detail-modal-backdrop" onClick={closeModelDetail} role="presentation">
           <div
             aria-labelledby="model-detail-modal-title"
             aria-modal="true"
@@ -888,19 +871,23 @@ export function ModelsScreen({
                 </div>
 
                 <div className="pill-row">
-                  {selectedModel.tags.length > 0 ? selectedModel.tags.map((tag) => (
-                    <span className="meta-pill" key={tag}>
-                      #{tag}
-                    </span>
-                  )) : <span className="meta-pill meta-pill-muted">No tags</span>}
+                  {selectedModel.tags.length > 0 ? (
+                    selectedModel.tags.map((tag) => (
+                      <span className="meta-pill" key={tag}>
+                        #{tag}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="meta-pill meta-pill-muted">No tags</span>
+                  )}
                   {selectedModel.capabilities.map((capability) => (
                     <span className="meta-pill" key={capability}>
                       {humanize(capability)}
                     </span>
                   ))}
                 </div>
-            </div>
-          ) : (
+              </div>
+            ) : (
               <div className="modal-panel" role="tabpanel">
                 <div className="advanced-config-card modal-section-card">
                   <div className="panel-header">
@@ -961,8 +948,8 @@ export function ModelsScreen({
                   </div>
                   <p>
                     Leave a capability on <strong>Inherit</strong> to keep the heuristic default
-                    from the GGUF artifact. Explicit overrides are saved to the profile and apply
-                    on the next preload.
+                    from the GGUF artifact. Explicit overrides are saved to the profile and apply on
+                    the next preload.
                   </p>
 
                   <div className="capability-override-list">
@@ -1004,7 +991,8 @@ export function ModelsScreen({
                             const value = selectedModel.capabilityOverrides[key];
                             return (
                               <span className="meta-pill" key={key}>
-                                {label}: {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                                {label}:{" "}
+                                {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
                               </span>
                             );
                           })
@@ -1144,7 +1132,11 @@ export function ModelsScreen({
           </label>
 
           <div className="button-row">
-            <button className="secondary-button" onClick={() => void handlePickImport()} type="button">
+            <button
+              className="secondary-button"
+              onClick={() => void handlePickImport()}
+              type="button"
+            >
               Choose GGUF
             </button>
             <button
@@ -1217,7 +1209,9 @@ export function ModelsScreen({
                   onClick={() => void handleActivateEngineVersion()}
                   type="button"
                 >
-                  {pendingEngineAction === "activate" ? "Activating..." : "Activate selected version"}
+                  {pendingEngineAction === "activate"
+                    ? "Activating..."
+                    : "Activate selected version"}
                 </button>
               </div>
 
@@ -1249,13 +1243,22 @@ export function ModelsScreen({
           ) : (
             <div className="engine-list">
               {engines.map((engine) => (
-                <div className={engine.active ? "engine-card engine-card-active" : "engine-card"} key={engine.id}>
+                <div
+                  className={engine.active ? "engine-card engine-card-active" : "engine-card"}
+                  key={engine.id}
+                >
                   <div className="model-card-head">
                     <div>
                       <span className="section-label">{engine.engineType}</span>
                       <h4>{engine.version}</h4>
                     </div>
-                    <span className={engine.active ? "status-pill status-pill-positive" : "status-pill status-pill-neutral"}>
+                    <span
+                      className={
+                        engine.active
+                          ? "status-pill status-pill-positive"
+                          : "status-pill status-pill-neutral"
+                      }
+                    >
                       {engine.active ? "Active" : "Installed"}
                     </span>
                   </div>
