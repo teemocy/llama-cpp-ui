@@ -696,8 +696,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
         <div className="panel-header">
           <div>
             <span className="section-label">Sessions</span>
-            <h3>Persistent history</h3>
-            <p>Keep recent sessions within reach and switch without losing context.</p>
+            <h3>Chats</h3>
           </div>
           <button
             className="secondary-button"
@@ -705,7 +704,7 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
             onClick={() => void createSession()}
             type="button"
           >
-            New session
+            NEW
           </button>
         </div>
         <div className="model-list">
