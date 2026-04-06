@@ -379,12 +379,37 @@ export function App() {
   return (
     <HashRouter>
       <div className="app-shell">
-        <aside className="sidebar">
-          <div className="brand-card">
-            <h1>Local LLM Hub</h1>
-            <p>Chat, downloads, and observability are now wired into the desktop control plane.</p>
+        <header className="app-header">
+          <div className="app-header-brand">
+            <h1>LLM Hub</h1>
           </div>
+          <div className="app-header-aside">
+            <p className="app-header-description">
+              Operational workspace for local model workflows, downloads, and observability across
+              the desktop control plane.
+            </p>
+            <div className="topbar-meta app-header-stats">
+              <div className="app-header-connection">
+                <span className="section-label">Connection</span>
+                <h2>{shellState.discovery?.publicBaseUrl ?? "Waiting for discovery"}</h2>
+              </div>
+              <div>
+                <span className="section-label">Started</span>
+                <strong>{formatClock(shellState.startedAt)}</strong>
+              </div>
+              <div>
+                <span className="section-label">Registered models</span>
+                <strong>{modelLibrary.length}</strong>
+              </div>
+              <div>
+                <span className="section-label">Active engines</span>
+                <strong>{activeEngineCount}</strong>
+              </div>
+            </div>
+          </div>
+        </header>
 
+        <aside className="sidebar">
           <nav className="nav-stack">
             {navItems.map((item) => (
               <NavLink
@@ -410,27 +435,6 @@ export function App() {
         </aside>
 
         <main className="content-shell">
-          <header className="topbar">
-            <div>
-              <span className="section-label">Connection</span>
-              <h2>{shellState.discovery?.publicBaseUrl ?? "Waiting for discovery"}</h2>
-            </div>
-            <div className="topbar-meta">
-              <div>
-                <span className="section-label">Started</span>
-                <strong>{formatClock(shellState.startedAt)}</strong>
-              </div>
-              <div>
-                <span className="section-label">Registered models</span>
-                <strong>{modelLibrary.length}</strong>
-              </div>
-              <div>
-                <span className="section-label">Active engines</span>
-                <strong>{activeEngineCount}</strong>
-              </div>
-            </div>
-          </header>
-
           {shellState.phase === "error" || shellState.phase === "stopped" ? (
             <article className="wide-card feedback-card feedback-card-error">
               <strong>
