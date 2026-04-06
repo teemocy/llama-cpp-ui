@@ -48,6 +48,33 @@ const sortByUpdatedDesc = (sessions: ChatSession[]): ChatSession[] =>
 const createClientRequestId = (): string =>
   window.crypto?.randomUUID?.() ?? `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
+const normalizeSessionTitle = (value: string): string => value.trim();
+
+const formatSessionFileName = (title: string, sessionId: string): string => {
+  const slug = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return `chat-session-${slug || sessionId}`;
+};
+
+const downloadJson = (fileName: string, payload: unknown): void => {
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+    type: "application/json;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.rel = "noopener";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+};
+
 const parseMaxTokensDraft = (value: string): number | undefined => {
   const normalized = value.trim();
   if (normalized.length === 0) {
@@ -189,6 +216,9 @@ const renderChatContent = (content: ChatMessage["content"]): ReactNode => {
 export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
+  const [renameSessionDraft, setRenameSessionDraft] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>(models[0]?.id ?? "");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -200,9 +230,14 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
   const [sessionActionBusy, setSessionActionBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const sessionListRef = useRef<HTMLDivElement | null>(null);
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
+  );
+  const renameSessionTarget = useMemo(
+    () => sessions.find((session) => session.id === renameSessionId) ?? null,
+    [sessions, renameSessionId],
   );
   const selectedModel = useMemo(
     () => models.find((model) => model.id === selectedModelId) ?? null,
@@ -214,6 +249,45 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     ? new Date(activeSession.updatedAt).toLocaleString()
     : "Create a session or send a prompt to start one.";
   const sessionStatusLabel = activeSession ? "Active session" : "No session selected";
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (sessionListRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpenSessionMenuId(null);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenSessionMenuId(null);
+        closeRenameSessionDialog(true);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!renameSessionTarget) {
+      setRenameSessionDraft("");
+      return;
+    }
+
+    setRenameSessionDraft(renameSessionTarget.title ?? "Untitled chat");
+  }, [renameSessionTarget]);
 
   useEffect(() => {
     if (models.length === 0) {
@@ -384,23 +458,6 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     return next;
   };
 
-  const saveSessionConfig = async () => {
-    if (sessionActionBusy) {
-      return;
-    }
-
-    setSessionActionBusy(true);
-
-    try {
-      setError(null);
-      await ensureSession();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to save session settings.");
-    } finally {
-      setSessionActionBusy(false);
-    }
-  };
-
   const sendMessage = async () => {
     const prompt = draft.trim();
     const messageContent = buildMessageContent(prompt, attachments);
@@ -502,12 +559,98 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
     }
   };
 
-  const deleteSession = async () => {
-    if (!activeSessionId || sessionActionBusy) {
+  const openRenameSessionDialog = (session: ChatSession) => {
+    if (sessionActionBusy) {
       return;
     }
 
-    const sessionLabel = sessionTitleDraft.trim() || activeSessionTitle;
+    setOpenSessionMenuId(null);
+    setRenameSessionId(session.id);
+    setRenameSessionDraft(session.title ?? "Untitled chat");
+  };
+
+  const closeRenameSessionDialog = (force = false) => {
+    if (sessionActionBusy && !force) {
+      return;
+    }
+
+    setRenameSessionId(null);
+    setRenameSessionDraft("");
+  };
+
+  const saveRenamedSession = async () => {
+    if (!renameSessionTarget || sessionActionBusy) {
+      return;
+    }
+
+    const normalizedTitle = normalizeSessionTitle(renameSessionDraft);
+    if (normalizedTitle.length === 0) {
+      setError("Session title cannot be empty.");
+      return;
+    }
+
+    const renamingActiveSession = renameSessionTarget.id === activeSessionId;
+
+    setSessionActionBusy(true);
+
+    try {
+      setError(null);
+      const next = await window.desktopApi.gateway.upsertChatSession({
+        id: renameSessionTarget.id,
+        title: normalizedTitle,
+        ...(renameSessionTarget.modelId ? { modelId: renameSessionTarget.modelId } : {}),
+        ...(renameSessionTarget.systemPrompt
+          ? { systemPrompt: renameSessionTarget.systemPrompt }
+          : {}),
+      });
+      startTransition(() => {
+        setSessions((current) =>
+          sortByUpdatedDesc([next, ...current.filter((item) => item.id !== next.id)]),
+        );
+        if (renamingActiveSession) {
+          setSessionTitleDraft(normalizedTitle);
+        }
+      });
+      closeRenameSessionDialog(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to rename session.");
+    } finally {
+      setSessionActionBusy(false);
+    }
+  };
+
+  const exportSession = async (session: ChatSession) => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    setSessionActionBusy(true);
+
+    try {
+      setError(null);
+      const response = await window.desktopApi.gateway.listChatMessages(session.id);
+      const fileName = `${formatSessionFileName(session.title || "chat-session", session.id)}-${
+        session.updatedAt.slice(0, 10)
+      }.json`;
+      downloadJson(fileName, {
+        exportedAt: new Date().toISOString(),
+        session,
+        messages: response.data,
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to export session.");
+    } finally {
+      setSessionActionBusy(false);
+    }
+  };
+
+  const deleteSession = async (session: ChatSession) => {
+    if (sessionActionBusy) {
+      return;
+    }
+
+    const deletingActiveSession = session.id === activeSessionId;
+    const sessionLabel = session.title?.trim() || "Untitled chat";
     if (
       !window.confirm(
         `Delete "${sessionLabel}"? This will remove the session and all of its messages.`,
@@ -520,20 +663,25 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
 
     try {
       setError(null);
-      await window.desktopApi.gateway.deleteChatSession(activeSessionId);
+      await window.desktopApi.gateway.deleteChatSession(session.id);
       const response = await window.desktopApi.gateway.listChatSessions();
+      if (renameSessionTarget?.id === session.id) {
+        closeRenameSessionDialog(true);
+      }
 
       startTransition(() => {
         const sorted = sortByUpdatedDesc(response.data);
         setSessions(sorted);
         setActiveSessionId((current) => {
-          if (current && sorted.some((session) => session.id === current)) {
+          if (current && sorted.some((candidate) => candidate.id === current)) {
             return current;
           }
 
           return sorted[0]?.id ?? null;
         });
-        setMessages([]);
+        if (deletingActiveSession) {
+          setMessages([]);
+        }
       });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to delete session.");
@@ -567,22 +715,87 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
               <p>Send a prompt to start your first chat transcript.</p>
             </div>
           ) : (
-            sessions.map((session) => (
-              <button
-                className={
-                  session.id === activeSessionId
-                    ? "model-list-item model-list-item-active"
-                    : "model-list-item"
-                }
-                disabled={shellState.phase !== "connected" || busy || sessionActionBusy}
-                key={session.id}
-                onClick={() => setActiveSessionId(session.id)}
-                type="button"
-              >
-                <h4>{session.title ?? "Untitled chat"}</h4>
-                <p>{new Date(session.updatedAt).toLocaleString()}</p>
-              </button>
-            ))
+            <div className="chat-session-items" ref={sessionListRef}>
+              {sessions.map((session) => (
+                <div className="chat-session-item" key={session.id}>
+                  <button
+                    className={
+                      session.id === activeSessionId
+                        ? "model-list-item model-list-item-active chat-session-select"
+                        : "model-list-item chat-session-select"
+                    }
+                    disabled={shellState.phase !== "connected" || busy || sessionActionBusy}
+                    onClick={() => {
+                      setActiveSessionId(session.id);
+                      setOpenSessionMenuId(null);
+                    }}
+                    type="button"
+                  >
+                    <h4>{session.title ?? "Untitled chat"}</h4>
+                    <p>{new Date(session.updatedAt).toLocaleString()}</p>
+                  </button>
+                  <div className="chat-session-menu-shell">
+                    <button
+                      aria-expanded={openSessionMenuId === session.id}
+                      aria-haspopup="menu"
+                      aria-label={`Session actions for ${session.title ?? "Untitled chat"}`}
+                      className="session-menu-trigger"
+                      disabled={shellState.phase !== "connected" || busy || sessionActionBusy}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenSessionMenuId((current) =>
+                          current === session.id ? null : session.id,
+                        );
+                      }}
+                      type="button"
+                    >
+                      ...
+                    </button>
+                    {openSessionMenuId === session.id ? (
+                      <div
+                        className="session-menu-panel"
+                        role="menu"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <button
+                          className="session-menu-action"
+                          onClick={() => {
+                            setOpenSessionMenuId(null);
+                            openRenameSessionDialog(session);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          Rename
+                        </button>
+                        <button
+                          className="session-menu-action"
+                          onClick={() => {
+                            setOpenSessionMenuId(null);
+                            void exportSession(session);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          Export
+                        </button>
+                        <button
+                          className="session-menu-action session-menu-action-danger"
+                          onClick={() => {
+                            setOpenSessionMenuId(null);
+                            void deleteSession(session);
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       </article>
@@ -616,28 +829,64 @@ export function ChatScreen({ shellState, models }: ChatScreenProps) {
           </div>
         </div>
 
-        <div className="chat-session-actions">
-          <button
-            className="secondary-button"
-            disabled={
-              shellState.phase !== "connected" || !activeSession || busy || sessionActionBusy
-            }
-            onClick={() => void saveSessionConfig()}
-            type="button"
+        {renameSessionTarget ? (
+          <div
+            className="model-detail-modal-backdrop chat-rename-backdrop"
+            onClick={() => closeRenameSessionDialog()}
+            role="presentation"
           >
-            Save session
-          </button>
-          <button
-            className="secondary-button danger-button"
-            disabled={
-              shellState.phase !== "connected" || !activeSession || busy || sessionActionBusy
-            }
-            onClick={() => void deleteSession()}
-            type="button"
-          >
-            Delete session
-          </button>
-        </div>
+            <form
+              aria-labelledby="chat-rename-modal-title"
+              aria-modal="true"
+              className="model-detail-modal chat-rename-modal"
+              onClick={(event) => event.stopPropagation()}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveRenamedSession();
+              }}
+              role="dialog"
+            >
+              <div className="modal-shell-header">
+                <div>
+                  <span className="section-label">Rename session</span>
+                  <h3 id="chat-rename-modal-title">Update the session title</h3>
+                  <p>Choose a new label for this chat thread.</p>
+                </div>
+                <div className="modal-shell-actions">
+                  <button
+                    className="secondary-button"
+                    onClick={() => closeRenameSessionDialog()}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              <div className="modal-panel">
+                <label className="field-stack">
+                  <span className="section-label">Session name</span>
+                  <input
+                    autoFocus
+                    className="text-input"
+                    disabled={sessionActionBusy}
+                    onChange={(event) => setRenameSessionDraft(event.target.value)}
+                    placeholder="Untitled chat"
+                    value={renameSessionDraft}
+                  />
+                </label>
+                <div className="detail-actions">
+                  <button
+                    className="primary-button"
+                    disabled={sessionActionBusy || renameSessionDraft.trim().length === 0}
+                    type="submit"
+                  >
+                    {sessionActionBusy ? "Saving..." : "Rename"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        ) : null}
 
         <div className="chat-controls">
           <label className="field-stack">
