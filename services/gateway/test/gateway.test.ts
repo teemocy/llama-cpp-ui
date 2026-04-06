@@ -88,7 +88,8 @@ describe("gateway skeleton", () => {
       object: "list",
       data: expect.arrayContaining([
         expect.objectContaining({
-          id: "localhub/tinyllama-1.1b-chat-q4",
+          id: "Tinyllama 1.1b Chat Q4",
+          model_id: "localhub/tinyllama-1.1b-chat-q4",
         }),
       ]),
     });
@@ -221,6 +222,47 @@ describe("gateway skeleton", () => {
         loaded: true,
         state: "ready",
       }),
+    });
+
+    const listResponse = await gateway.publicApp.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: {
+        authorization: "Bearer public-secret",
+      },
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toMatchObject({
+      object: "list",
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          id: "Tiny Llama Alias",
+          model_id: "localhub/tinyllama-1.1b-chat-q4",
+        }),
+      ]),
+    });
+
+    const chatResponse = await gateway.publicApp.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer public-secret",
+      },
+      payload: {
+        model: "Tiny Llama Alias",
+        messages: [
+          {
+            role: "user",
+            content: "Hello from the alias.",
+          },
+        ],
+      },
+    });
+
+    expect(chatResponse.statusCode).toBe(200);
+    expect(chatResponse.json()).toMatchObject({
+      model: "Tiny Llama Alias",
     });
 
     const blockedResponse = await gateway.controlApp.inject({

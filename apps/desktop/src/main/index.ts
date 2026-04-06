@@ -217,7 +217,7 @@ const createWindow = async (): Promise<void> => {
 
 const createTray = (): void => {
   tray = new Tray(createTrayIcon());
-  tray.setToolTip("Local LLM Hub");
+  tray.setToolTip("LLM Hub");
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {

@@ -29,6 +29,7 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiModelCard,
   type OpenAiToolCall,
   chatCompletionsChunkSchema,
   gatewayEventSchema,
@@ -243,6 +244,66 @@ function buildAssistantMetadata(options: {
   }
 
   return metadata;
+}
+
+function getOptionalNumber(
+  value: unknown,
+  min?: number,
+  max?: number,
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  if (min !== undefined && value < min) {
+    return undefined;
+  }
+
+  if (max !== undefined && value > max) {
+    return undefined;
+  }
+
+  return value;
+}
+
+type ChatSettingsMetadata = {
+  maxMessagesInContext?: number;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+};
+
+function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSettingsMetadata {
+  const rawSettings = metadata?.chatSettings;
+  if (!rawSettings || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+    return {};
+  }
+
+  const record = rawSettings as Record<string, unknown>;
+
+  return {
+    temperature: getOptionalNumber(record.temperature, 0, 2),
+    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
+    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
+    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+  };
+}
+
+function buildChatCompletionMessages(
+  messages: ChatMessage[],
+  systemPrompt: string | undefined,
+  maxMessagesInContext?: number,
+): ChatCompletionsRequest["messages"] {
+  const scopedMessages =
+    maxMessagesInContext !== undefined ? messages.slice(-maxMessagesInContext) : messages;
+
+  return [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    ...scopedMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
 }
 
 function createStreamedAssistantAccumulator(): StreamedAssistantAccumulator {
@@ -548,12 +609,14 @@ export class MockGatewayRuntime {
     };
   }
 
-  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">> {
-    return this.listRuntimeModels().map(({ id, object, created, owned_by }) => ({
-      id,
-      object,
-      created,
-      owned_by,
+  listModels(): OpenAiModelCard[] {
+    return this.listDesktopModels().map((model) => ({
+      id: model.displayName,
+      name: model.displayName,
+      model_id: model.id,
+      object: "model",
+      created: Math.floor(Date.parse(model.createdAt) / 1000),
+      owned_by: "localhub",
     }));
   }
 
@@ -595,14 +658,20 @@ export class MockGatewayRuntime {
     const existing = input.id ? this.#chatSessions.get(input.id) : undefined;
     const session: ChatSession = {
       id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
-      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...(input.title !== undefined
+        ? { title: input.title }
+        : existing?.title
+          ? { title: existing.title }
+          : {}),
       ...((input.modelId ?? existing?.modelId)
         ? { modelId: input.modelId ?? existing?.modelId }
         : {}),
-      ...((input.systemPrompt ?? existing?.systemPrompt)
-        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
-        : {}),
-      metadata: existing?.metadata ?? {},
+      ...(input.systemPrompt !== undefined
+        ? { systemPrompt: input.systemPrompt }
+        : existing?.systemPrompt !== undefined
+          ? { systemPrompt: existing.systemPrompt }
+          : {}),
+      metadata: input.metadata ?? existing?.metadata ?? {},
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -626,19 +695,11 @@ export class MockGatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
+    const chatSettings = getChatSettings(session.metadata);
     const promptTokens = countChatContentTokens(input.message);
-    const response = this.createChatCompletion(
-      {
-        model: input.model,
-        stream: false,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [{ role: "user", content: input.message }],
-      },
-      { traceId: createTraceId(traceId) },
-    );
     const userMessage: ChatMessage = {
       id: `message_${Date.now()}`,
       sessionId: session.id,
@@ -649,6 +710,27 @@ export class MockGatewayRuntime {
       metadata: {},
       createdAt: now,
     };
+    this.#chatMessages.set(session.id, [
+      ...(this.#chatMessages.get(session.id) ?? []),
+      userMessage,
+    ]);
+    const response = this.createChatCompletion(
+      {
+        model: input.model,
+        stream: false,
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
+          ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
+          : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatMessages.get(session.id) ?? [],
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
+      },
+      { traceId: createTraceId(traceId) },
+    );
     const assistantMessage: ChatMessage = {
       id: `message_${Date.now() + 1}`,
       sessionId: session.id,
@@ -664,14 +746,13 @@ export class MockGatewayRuntime {
 
     this.#chatMessages.set(session.id, [
       ...(this.#chatMessages.get(session.id) ?? []),
-      userMessage,
       assistantMessage,
     ]);
 
     const updatedSession = this.upsertChatSession({
       id: session.id,
       modelId: input.model,
-      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
       ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
     });
 
@@ -687,9 +768,10 @@ export class MockGatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
     const now = new Date().toISOString();
+    const chatSettings = getChatSettings(session.metadata);
     const promptTokens = countChatContentTokens(input.message);
     const userMessage: ChatMessage = {
       id: `message_${Date.now()}`,
@@ -709,8 +791,16 @@ export class MockGatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [{ role: "user", content: input.message }],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...((input.maxTokens ?? chatSettings.maxOutputTokens) !== undefined
+          ? { max_tokens: input.maxTokens ?? chatSettings.maxOutputTokens }
+          : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatMessages.get(session.id) ?? [],
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       { traceId: createTraceId(traceId) },
     );
@@ -746,7 +836,7 @@ export class MockGatewayRuntime {
       this.upsertChatSession({
         id: session.id,
         modelId: input.model,
-        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
         ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
       });
     };
@@ -1085,11 +1175,13 @@ export class MockGatewayRuntime {
     input: DesktopModelConfigUpdateRequest,
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
-    const existing = this.#modelDetails.get(modelId);
-    if (!existing) {
+    const resolvedModelId = this.resolveModelId(modelId);
+    if (!resolvedModelId) {
       throw new Error(`Unknown model: ${modelId}`);
     }
-    if (existing.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
+
+    const current = this.getDesktopModelRecord(resolvedModelId);
+    if (current.loaded && hasRuntimeAffectingModelConfigChanges(input)) {
       throw new GatewayRequestError(
         "model_config_requires_cold_state",
         "Evict the model from memory before changing advanced runtime settings.",
@@ -1097,7 +1189,6 @@ export class MockGatewayRuntime {
       );
     }
 
-    const current = this.getDesktopModelRecord(modelId);
     const updated: DesktopModelRecord = {
       ...current,
       ...(input.displayName ? { displayName: input.displayName } : {}),
@@ -1113,16 +1204,18 @@ export class MockGatewayRuntime {
       updatedAt: new Date().toISOString(),
     };
     const baseCapabilities =
-      this.#modelBaseCapabilities.get(modelId) ?? current.capabilities ?? ["chat"];
+      this.#modelBaseCapabilities.get(resolvedModelId) ?? current.capabilities ?? ["chat"];
     updated.capabilities = applyCapabilityOverridesToLabels(
       baseCapabilities,
       updated.capabilityOverrides,
     );
-    updated.role = getModelRole(createModel(modelId, Math.floor(Date.now() / 1000), updated.capabilities));
-    this.#modelDetails.set(modelId, updated);
-    const runtimeModel = this.#models.get(modelId);
+    updated.role = getModelRole(
+      createModel(resolvedModelId, Math.floor(Date.now() / 1000), updated.capabilities),
+    );
+    this.#modelDetails.set(resolvedModelId, updated);
+    const runtimeModel = this.#models.get(resolvedModelId);
     if (runtimeModel) {
-      this.#models.set(modelId, {
+      this.#models.set(resolvedModelId, {
         ...runtimeModel,
         capabilities: [...updated.capabilities],
       });
@@ -1469,9 +1562,29 @@ export class MockGatewayRuntime {
   }
 
   private getDesktopModelRecord(modelId: string): DesktopModelRecord {
-    const updated = this.createDesktopModelRecord(modelId);
-    this.#modelDetails.set(modelId, updated);
+    const resolvedModelId = this.resolveModelId(modelId);
+    if (!resolvedModelId) {
+      throw new Error(`Unknown model: ${modelId}`);
+    }
+
+    const updated = this.createDesktopModelRecord(resolvedModelId);
+    this.#modelDetails.set(resolvedModelId, updated);
     return updated;
+  }
+
+  private resolveModelId(modelId: string): string | undefined {
+    if (this.#models.has(modelId)) {
+      return modelId;
+    }
+
+    for (const candidateId of this.#models.keys()) {
+      const existing = this.#modelDetails.get(candidateId) ?? this.createDesktopModelRecord(candidateId);
+      if (existing.displayName === modelId) {
+        return candidateId;
+      }
+    }
+
+    return undefined;
   }
 
   private getLoadedModelCount(): number {
@@ -1479,7 +1592,8 @@ export class MockGatewayRuntime {
   }
 
   private getModel(modelId: string): RuntimeModelRecord | undefined {
-    return this.#models.get(modelId);
+    const resolvedModelId = this.resolveModelId(modelId);
+    return resolvedModelId ? this.#models.get(resolvedModelId) : undefined;
   }
 
   private transitionModel(

@@ -48,6 +48,7 @@ import {
   type EmbeddingsRequest,
   type EmbeddingsResponse,
   type GatewayEvent,
+  type OpenAiModelCard,
   type OpenAiToolCall,
   chatCompletionsChunkSchema,
   chatCompletionsResponseSchema,
@@ -69,15 +70,15 @@ import type {
   ModelProfile,
 } from "@localhub/shared-contracts/foundation-models";
 import type {
-  ProviderArtifactDescriptor,
-  ProviderId,
-  ProviderModelSummary,
-} from "@localhub/shared-contracts/foundation-providers";
-import type {
   ChatMessage,
   ChatSession,
   EngineVersionRecord,
 } from "@localhub/shared-contracts/foundation-persistence";
+import type {
+  ProviderArtifactDescriptor,
+  ProviderId,
+  ProviderModelSummary,
+} from "@localhub/shared-contracts/foundation-providers";
 
 import {
   type ChatCompletionsStreamResult,
@@ -117,6 +118,7 @@ const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 1_500;
 const DEFAULT_WORKER_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESIDENT_MEMORY_BYTES = 0;
+const DEFAULT_MAX_WORKERS_PER_MODEL = 2;
 const DEFAULT_FAILURE_BACKOFF_MS = 250;
 const DEFAULT_FAILURE_BACKOFF_MAX_MS = 2_000;
 const DEFAULT_FAILURE_WINDOW_MS = 60_000;
@@ -157,6 +159,13 @@ interface StreamedAssistantAccumulator {
   totalTokens?: number;
 }
 
+type ChatSettingsMetadata = {
+  maxMessagesInContext?: number;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+};
+
 interface CatalogVariantArtifact {
   artifact: ProviderArtifactDescriptor;
   auxiliary: boolean;
@@ -185,6 +194,61 @@ function extractTrailingQuantization(stem: string): string | undefined {
       stem,
     );
   return normalizeQuantLabel(match?.[1]);
+}
+
+function getOptionalNumber(
+  value: unknown,
+  min?: number,
+  max?: number,
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  if (min !== undefined && value < min) {
+    return undefined;
+  }
+
+  if (max !== undefined && value > max) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function getChatSettings(metadata: Record<string, unknown> | undefined): ChatSettingsMetadata {
+  const rawSettings = metadata?.chatSettings;
+  if (!rawSettings || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
+    return {};
+  }
+
+  const record = rawSettings as Record<string, unknown>;
+
+  return {
+    temperature: getOptionalNumber(record.temperature, 0, 2),
+    topP: getOptionalNumber(record.topP ?? record.top_p, 0, 1),
+    maxOutputTokens: getOptionalNumber(record.maxOutputTokens, 1),
+    maxMessagesInContext: getOptionalNumber(record.maxMessagesInContext, 1),
+  };
+}
+
+function buildChatCompletionMessages(
+  chatRepository: ChatRepository,
+  sessionId: string,
+  systemPrompt: string | undefined,
+  maxMessagesInContext?: number,
+): ChatCompletionsRequest["messages"] {
+  const messages = chatRepository.listMessages(sessionId);
+  const scopedMessages =
+    maxMessagesInContext !== undefined ? messages.slice(-maxMessagesInContext) : messages;
+
+  return [
+    ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+    ...scopedMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+  ];
 }
 
 function stripTrailingToken(value: string, token: string | undefined): string {
@@ -379,6 +443,7 @@ interface RepositoryGatewayRuntimeOptions {
   shutdownDrainTimeoutMs?: number;
   workerStopTimeoutMs?: number;
   maxResidentMemoryBytes?: number;
+  maxWorkersPerModel?: number;
   failureBackoffMs?: number;
   failureBackoffMaxMs?: number;
   failureWindowMs?: number;
@@ -415,6 +480,11 @@ interface ManagedWorker {
   runtimeKey: RuntimeEventKey;
   runtimeKeyString: string;
   state: WorkerState;
+}
+
+interface RequestQueueEntry {
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }
 
 interface WorkerFailureState {
@@ -468,18 +538,14 @@ function applyCapabilityOverrides(
     tools: normalizedOverrides.tools ?? capabilities.tools,
     streaming: normalizedOverrides.streaming ?? capabilities.streaming,
     vision: normalizedOverrides.vision ?? capabilities.vision,
-    audioTranscription:
-      normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
+    audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
     promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
   };
 }
 
-function getEffectiveCapabilities(
-  artifact: ModelArtifact,
-  profile?: ModelProfile,
-): CapabilitySet {
+function getEffectiveCapabilities(artifact: ModelArtifact, profile?: ModelProfile): CapabilitySet {
   return applyCapabilityOverrides(artifact.capabilities, profile?.capabilityOverrides);
 }
 
@@ -641,9 +707,7 @@ function getArtifactStatus(artifact: ModelArtifact): "available" | "missing" {
   return existsSync(artifact.localPath) ? "available" : "missing";
 }
 
-function hasRuntimeAffectingModelConfigChanges(
-  input: DesktopModelConfigUpdateRequest,
-): boolean {
+function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
@@ -1176,6 +1240,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #shutdownDrainTimeoutMs: number;
   readonly #workerStopTimeoutMs: number;
   readonly #maxResidentMemoryBytes: number;
+  readonly #maxWorkersPerModel: number;
   readonly #failureBackoffMs: number;
   readonly #failureBackoffMaxMs: number;
   readonly #failureWindowMs: number;
@@ -1186,10 +1251,13 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   #stopping = false;
   #stopPromise: Promise<void> | undefined;
   #telemetryTimer: NodeJS.Timeout | undefined;
-  #loadPromises = new Map<string, Promise<ManagedWorker>>();
+  #loadPromises = new Map<string, Set<Promise<ManagedWorker>>>();
+  #pendingLoadReservations = new Map<string, number>();
+  #requestQueues = new Map<string, RequestQueueEntry[]>();
+  #activeRequestCounts = new Map<string, number>();
   #modelSnapshots = new Map<string, RuntimeSnapshot>();
   #workerFailures = new Map<string, WorkerFailureState>();
-  #workers = new Map<string, ManagedWorker>();
+  #workers = new Map<string, ManagedWorker[]>();
 
   constructor(options: RepositoryGatewayRuntimeOptions) {
     const environment = options.env?.LOCAL_LLM_HUB_ENV as
@@ -1216,6 +1284,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#workerStopTimeoutMs = options.workerStopTimeoutMs ?? DEFAULT_WORKER_STOP_TIMEOUT_MS;
     this.#maxResidentMemoryBytes =
       options.maxResidentMemoryBytes ?? DEFAULT_MAX_RESIDENT_MEMORY_BYTES;
+    this.#maxWorkersPerModel = options.maxWorkersPerModel ?? DEFAULT_MAX_WORKERS_PER_MODEL;
     this.#failureBackoffMs = options.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS;
     this.#failureBackoffMaxMs = options.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS;
     this.#failureWindowMs = options.failureWindowMs ?? DEFAULT_FAILURE_WINDOW_MS;
@@ -1324,7 +1393,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       );
     }
 
-    const activeWorkers = Array.from(this.#workers.values());
+    this.rejectQueuedRequests(
+      new GatewayRequestError(
+        "gateway_stopping",
+        "The gateway is shutting down and is not accepting new work.",
+        503,
+      ),
+    );
+
+    const activeWorkers = this.getAllWorkers();
     await Promise.allSettled(
       activeWorkers.map((worker) =>
         this.stopWorker(
@@ -1336,9 +1413,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ),
       ),
     );
-    await Promise.allSettled(Array.from(this.#loadPromises.values()));
+    await Promise.allSettled(this.getAllLoadPromises());
     this.#workers.clear();
     this.#loadPromises.clear();
+    this.#pendingLoadReservations.clear();
 
     if (this.#started) {
       this.publishLog(
@@ -1380,13 +1458,19 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     };
   }
 
-  listModels(): Array<Pick<RuntimeModelRecord, "id" | "object" | "created" | "owned_by">> {
-    return this.#modelsRepository.list().map((stored) => ({
-      id: stored.artifact.id,
-      object: "model",
-      created: getCreatedEpochSeconds(stored.artifact),
-      owned_by: "localhub",
-    }));
+  listModels(): OpenAiModelCard[] {
+    return this.#modelsRepository.list().map((stored) => {
+      const profile = this.getProfile(stored);
+
+      return {
+        id: profile.displayName,
+        name: profile.displayName,
+        model_id: stored.artifact.id,
+        object: "model",
+        created: getCreatedEpochSeconds(stored.artifact),
+        owned_by: "localhub",
+      };
+    });
   }
 
   listRuntimeModels(): RuntimeModelRecord[] {
@@ -1445,14 +1529,20 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       : undefined;
     const session: ChatSession = {
       id: existing?.id ?? input.id ?? `session_${randomUUID().slice(0, 12)}`,
-      ...((input.title ?? existing?.title) ? { title: input.title ?? existing?.title } : {}),
+      ...(input.title !== undefined
+        ? { title: input.title }
+        : existing?.title
+          ? { title: existing.title }
+          : {}),
       ...((input.modelId ?? existing?.modelId)
         ? { modelId: input.modelId ?? existing?.modelId }
         : {}),
-      ...((input.systemPrompt ?? existing?.systemPrompt)
-        ? { systemPrompt: input.systemPrompt ?? existing?.systemPrompt }
-        : {}),
-      metadata: existing?.metadata ?? {},
+      ...(input.systemPrompt !== undefined
+        ? { systemPrompt: input.systemPrompt }
+        : existing?.systemPrompt !== undefined
+          ? { systemPrompt: existing.systemPrompt }
+          : {}),
+      metadata: input.metadata ?? existing?.metadata ?? {},
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     };
@@ -1470,8 +1560,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
+    const chatSettings = getChatSettings(session.metadata);
+    const maxTokens = input.maxTokens ?? chatSettings.maxOutputTokens;
     const userMessage: ChatMessage = {
       id: `message_${randomUUID().slice(0, 12)}`,
       sessionId: session.id,
@@ -1488,16 +1580,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: false,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [
-          ...(session.systemPrompt
-            ? [{ role: "system" as const, content: session.systemPrompt }]
-            : []),
-          ...this.#chatRepository.listMessages(session.id).map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-        ],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatRepository,
+          session.id,
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       {
         traceId: normalizeTraceId(traceId),
@@ -1525,8 +1616,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const updatedSession = this.upsertChatSession({
       id: session.id,
       modelId: input.model,
-      ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
-      ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+      ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
+      ...(session.title
+        ? { title: session.title }
+        : { title: createChatSessionTitle(input.message) }),
     });
 
     return desktopChatRunResponseSchema.parse({
@@ -1546,8 +1639,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const session = this.upsertChatSession({
       ...(input.sessionId ? { id: input.sessionId } : {}),
       modelId: input.model,
-      ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}),
+      ...(input.systemPrompt !== undefined ? { systemPrompt: input.systemPrompt } : {}),
     });
+    const chatSettings = getChatSettings(session.metadata);
+    const maxTokens = input.maxTokens ?? chatSettings.maxOutputTokens;
     const userMessage: ChatMessage = {
       id: `message_${randomUUID().slice(0, 12)}`,
       sessionId: session.id,
@@ -1566,16 +1661,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
-        messages: [
-          ...(session.systemPrompt
-            ? [{ role: "system" as const, content: session.systemPrompt }]
-            : []),
-          ...this.#chatRepository.listMessages(session.id).map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
-        ],
+        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
+        ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+        messages: buildChatCompletionMessages(
+          this.#chatRepository,
+          session.id,
+          session.systemPrompt,
+          chatSettings.maxMessagesInContext,
+        ),
       },
       {
         traceId: normalizedTraceId,
@@ -1606,8 +1700,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       this.upsertChatSession({
         id: session.id,
         modelId: input.model,
-        ...(session.systemPrompt ? { systemPrompt: session.systemPrompt } : {}),
-        ...(session.title ? { title: session.title } : { title: createChatSessionTitle(input.message) }),
+        ...(session.systemPrompt !== undefined ? { systemPrompt: session.systemPrompt } : {}),
+        ...(session.title
+          ? { title: session.title }
+          : { title: createChatSessionTitle(input.message) }),
       });
     };
 
@@ -1881,7 +1977,10 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
 
-    if (hasRuntimeAffectingModelConfigChanges(input) && this.#workers.has(resolved.runtimeKeyString)) {
+    if (
+      hasRuntimeAffectingModelConfigChanges(input) &&
+      this.getWorkerPool(resolved.runtimeKeyString).length > 0
+    ) {
       throw new GatewayRequestError(
         "model_config_requires_cold_state",
         "Evict the model from memory before changing advanced runtime settings.",
@@ -1932,58 +2031,64 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   async preloadModel(modelId: string, traceId?: string): Promise<PreloadModelResult> {
     this.assertAcceptingNewWork();
     const resolved = this.resolveModelRecord(modelId);
-    const existingWorker = this.#workers.get(resolved.runtimeKeyString);
+    const existingWorkers = this.getWorkerPool(resolved.runtimeKeyString);
+    const warmWorker = existingWorkers.find(
+      (worker) => worker.state === "Ready" || worker.state === "Busy",
+    );
 
-    if (existingWorker && (existingWorker.state === "Ready" || existingWorker.state === "Busy")) {
-      this.refreshTtl(existingWorker);
+    if (warmWorker) {
+      this.refreshTtl(warmWorker);
       return {
         model: this.getRuntimeModelById(modelId),
         alreadyWarm: true,
       };
     }
 
-    const existingLoad = this.#loadPromises.get(resolved.runtimeKeyString);
-    if (existingLoad) {
-      await existingLoad;
-      return {
-        model: this.getRuntimeModelById(modelId),
-        alreadyWarm: false,
-      };
+    const existingLoad = this.getPendingLoadPromises(resolved.runtimeKeyString);
+    if (existingLoad.length > 0) {
+      await Promise.any(existingLoad);
+
+      const refreshedWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+        (worker) => worker.state === "Ready" || worker.state === "Busy",
+      );
+      if (refreshedWorker) {
+        this.refreshTtl(refreshedWorker);
+        return {
+          model: this.getRuntimeModelById(modelId),
+          alreadyWarm: false,
+        };
+      }
     }
 
     const loadPromise = this.loadWorker(resolved, normalizeTraceId(traceId));
-    this.#loadPromises.set(resolved.runtimeKeyString, loadPromise);
-
-    try {
-      await loadPromise;
-      return {
-        model: this.getRuntimeModelById(modelId),
-        alreadyWarm: false,
-      };
-    } finally {
-      if (this.#loadPromises.get(resolved.runtimeKeyString) === loadPromise) {
-        this.#loadPromises.delete(resolved.runtimeKeyString);
-      }
-    }
+    await loadPromise;
+    return {
+      model: this.getRuntimeModelById(modelId),
+      alreadyWarm: false,
+    };
   }
 
   async evictModel(modelId: string, traceId?: string): Promise<EvictModelResult> {
     const resolved = this.resolveModelRecord(modelId);
-    const pendingLoad = this.#loadPromises.get(resolved.runtimeKeyString);
+    const pendingLoad = this.getPendingLoadPromises(resolved.runtimeKeyString);
 
-    if (pendingLoad) {
-      await pendingLoad.catch(() => undefined);
+    if (pendingLoad.length > 0) {
+      await Promise.allSettled(pendingLoad);
     }
 
-    const worker = this.#workers.get(resolved.runtimeKeyString);
-    if (!worker) {
+    const workers = [...this.getWorkerPool(resolved.runtimeKeyString)];
+    if (workers.length === 0) {
       return {
         model: this.getRuntimeModelById(modelId),
         wasLoaded: false,
       };
     }
 
-    await this.stopWorker(worker, normalizeTraceId(traceId), "Model was evicted from memory.");
+    await Promise.allSettled(
+      workers.map((worker) =>
+        this.stopWorker(worker, normalizeTraceId(traceId), "Model was evicted from memory."),
+      ),
+    );
 
     return {
       model: this.getRuntimeModelById(modelId),
@@ -2260,13 +2365,247 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
   }
 
+  private getWorkerPool(runtimeKeyString: string): ManagedWorker[] {
+    return this.#workers.get(runtimeKeyString) ?? [];
+  }
+
+  private getAllWorkers(): ManagedWorker[] {
+    return Array.from(this.#workers.values()).flat();
+  }
+
+  private getPendingLoadPromises(runtimeKeyString: string): Promise<ManagedWorker>[] {
+    return Array.from(this.#loadPromises.get(runtimeKeyString) ?? []);
+  }
+
+  private getAllLoadPromises(): Promise<ManagedWorker>[] {
+    return Array.from(this.#loadPromises.values()).flatMap((pendingLoads) =>
+      Array.from(pendingLoads),
+    );
+  }
+
+  private getWorkerPoolSize(runtimeKeyString: string): number {
+    return this.getWorkerPool(runtimeKeyString).length;
+  }
+
+  private getPendingLoadReservationCount(runtimeKeyString: string): number {
+    return this.#pendingLoadReservations.get(runtimeKeyString) ?? 0;
+  }
+
+  private getActiveRequestCount(runtimeKeyString: string): number {
+    return this.#activeRequestCounts.get(runtimeKeyString) ?? 0;
+  }
+
+  private getQueuedRequestEntries(runtimeKeyString: string): RequestQueueEntry[] {
+    return this.#requestQueues.get(runtimeKeyString) ?? [];
+  }
+
+  private getQueuedRequestCount(runtimeKeyString: string): number {
+    return this.getQueuedRequestEntries(runtimeKeyString).length;
+  }
+
+  private getTotalQueuedRequestCount(): number {
+    return Array.from(this.#requestQueues.values()).reduce(
+      (total, entries) => total + entries.length,
+      0,
+    );
+  }
+
+  private incrementPendingLoadReservation(runtimeKeyString: string): void {
+    this.#pendingLoadReservations.set(
+      runtimeKeyString,
+      this.getPendingLoadReservationCount(runtimeKeyString) + 1,
+    );
+  }
+
+  private decrementPendingLoadReservation(runtimeKeyString: string): void {
+    const nextCount = Math.max(0, this.getPendingLoadReservationCount(runtimeKeyString) - 1);
+    if (nextCount === 0) {
+      this.#pendingLoadReservations.delete(runtimeKeyString);
+      return;
+    }
+
+    this.#pendingLoadReservations.set(runtimeKeyString, nextCount);
+  }
+
+  private getWorkerSlotCount(runtimeKeyString: string): number {
+    return (
+      this.getWorkerPoolSize(runtimeKeyString) +
+      this.getPendingLoadReservationCount(runtimeKeyString)
+    );
+  }
+
+  private async acquireRequestTurn(runtimeKeyString: string, traceId: string): Promise<void> {
+    if (this.#stopping) {
+      throw new GatewayRequestError(
+        "gateway_stopping",
+        "The gateway is shutting down and is not accepting new work.",
+        503,
+      );
+    }
+
+    const currentQueue = this.getQueuedRequestEntries(runtimeKeyString);
+    if (
+      currentQueue.length === 0 &&
+      this.getActiveRequestCount(runtimeKeyString) < this.#maxWorkersPerModel
+    ) {
+      this.#activeRequestCounts.set(
+        runtimeKeyString,
+        this.getActiveRequestCount(runtimeKeyString) + 1,
+      );
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const queue = this.getQueuedRequestEntries(runtimeKeyString);
+      queue.push({ resolve, reject });
+      this.#requestQueues.set(runtimeKeyString, queue);
+      this.publishLog(
+        "info",
+        `Queued request for model ${runtimeKeyString}.`,
+        traceId,
+        undefined,
+        "gateway",
+      );
+    });
+  }
+
+  private releaseRequestTurn(runtimeKeyString: string): void {
+    const queue = this.getQueuedRequestEntries(runtimeKeyString);
+    if (this.#stopping && queue.length > 0) {
+      for (const entry of queue) {
+        entry.reject(
+          new GatewayRequestError(
+            "gateway_stopping",
+            "The gateway is shutting down and is not accepting new work.",
+            503,
+          ),
+        );
+      }
+
+      this.#requestQueues.delete(runtimeKeyString);
+      const nextCount = Math.max(0, this.getActiveRequestCount(runtimeKeyString) - 1);
+      if (nextCount === 0) {
+        this.#activeRequestCounts.delete(runtimeKeyString);
+      } else {
+        this.#activeRequestCounts.set(runtimeKeyString, nextCount);
+      }
+      return;
+    }
+
+    if (queue.length > 0) {
+      const next = queue.shift();
+      if (queue.length === 0) {
+        this.#requestQueues.delete(runtimeKeyString);
+      } else {
+        this.#requestQueues.set(runtimeKeyString, queue);
+      }
+
+      this.#activeRequestCounts.set(
+        runtimeKeyString,
+        Math.max(1, this.getActiveRequestCount(runtimeKeyString)),
+      );
+      if (next) {
+        next.resolve();
+      }
+
+      return;
+    }
+
+    const nextCount = Math.max(0, this.getActiveRequestCount(runtimeKeyString) - 1);
+    if (nextCount === 0) {
+      this.#activeRequestCounts.delete(runtimeKeyString);
+      return;
+    }
+
+    this.#activeRequestCounts.set(runtimeKeyString, nextCount);
+  }
+
+  private rejectQueuedRequests(error: unknown): void {
+    for (const [runtimeKeyString, queue] of this.#requestQueues.entries()) {
+      for (const entry of queue) {
+        entry.reject(error);
+      }
+    }
+    this.#requestQueues.clear();
+  }
+
+  private addWorkerToPool(worker: ManagedWorker): void {
+    const pool = this.#workers.get(worker.runtimeKeyString);
+    if (pool) {
+      pool.push(worker);
+      return;
+    }
+
+    this.#workers.set(worker.runtimeKeyString, [worker]);
+  }
+
+  private removeWorkerFromPool(worker: ManagedWorker): boolean {
+    const pool = this.#workers.get(worker.runtimeKeyString);
+    if (!pool) {
+      return false;
+    }
+
+    const index = pool.indexOf(worker);
+    if (index < 0) {
+      return false;
+    }
+
+    pool.splice(index, 1);
+    if (pool.length === 0) {
+      this.#workers.delete(worker.runtimeKeyString);
+    }
+
+    return true;
+  }
+
+  private getRepresentativeWorker(workers: ManagedWorker[]): ManagedWorker | undefined {
+    return (
+      workers.find((worker) => worker.state === "Busy") ??
+      workers.find((worker) => worker.state === "Ready") ??
+      workers.find((worker) => worker.state === "Loading") ??
+      workers.find((worker) => worker.state === "Unloading") ??
+      workers.find((worker) => worker.state === "Crashed") ??
+      workers.find((worker) => worker.state === "CoolingDown") ??
+      workers[0]
+    );
+  }
+
+  private refreshModelSnapshot(
+    artifact: ModelArtifact,
+    runtimeKey: RuntimeEventKey,
+    runtimeKeyString: string,
+    lastError?: string,
+  ): void {
+    const workers = this.getWorkerPool(runtimeKeyString);
+    const representative = this.getRepresentativeWorker(workers);
+
+    if (!representative) {
+      this.#modelSnapshots.set(artifact.id, {
+        loaded: false,
+        runtimeKey,
+        state: "Idle",
+        updatedAt: nowIso(),
+        ...(lastError ? { lastError } : {}),
+      });
+      return;
+    }
+
+    this.#modelSnapshots.set(artifact.id, {
+      loaded: workers.some((worker) => isLoadedState(worker.state)),
+      runtimeKey: representative.runtimeKey,
+      state: representative.state,
+      updatedAt: nowIso(),
+      ...(lastError ? { lastError } : {}),
+    });
+  }
+
   private async waitForDrain(timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
       if (
-        this.#loadPromises.size === 0 &&
-        Array.from(this.#workers.values()).every((worker) => worker.inflightRequests === 0)
+        this.getAllLoadPromises().length === 0 &&
+        this.getAllWorkers().every((worker) => worker.inflightRequests === 0)
       ) {
         return true;
       }
@@ -2277,8 +2616,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     return (
-      this.#loadPromises.size === 0 &&
-      Array.from(this.#workers.values()).every((worker) => worker.inflightRequests === 0)
+      this.getAllLoadPromises().length === 0 &&
+      this.getAllWorkers().every((worker) => worker.inflightRequests === 0)
     );
   }
 
@@ -2286,13 +2625,24 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     return stored.profile ?? createDefaultProfile(stored.artifact, this.#defaultModelTtlMs);
   }
 
+  private findStoredModelRecord(modelId: string): StoredModelRecord | undefined {
+    const exactMatch = this.#modelsRepository.findById(modelId);
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    return this.#modelsRepository
+      .list()
+      .find((stored) => this.getProfile(stored).displayName === modelId);
+  }
+
   private getRuntimeModelById(modelId: string): RuntimeModelRecord {
-    const stored = this.#modelsRepository.findById(modelId);
+    const stored = this.findStoredModelRecord(modelId);
     if (!stored) {
       throw new Error(`Unknown model: ${modelId}`);
     }
 
-    return toRuntimeModelRecord(stored, this.#modelSnapshots.get(modelId));
+    return toRuntimeModelRecord(stored, this.#modelSnapshots.get(stored.artifact.id));
   }
 
   private replayModelSnapshots(): void {
@@ -2308,7 +2658,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   private resolveModelRecord(modelId: string): ResolvedModelRecord {
-    const stored = this.#modelsRepository.findById(modelId);
+    const stored = this.findStoredModelRecord(modelId);
     if (!stored) {
       throw new Error(`Unknown model: ${modelId}`);
     }
@@ -2352,62 +2702,80 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     if (requiresVision) {
       this.ensureModelCapability(resolved, "vision");
     }
-    await this.preloadModel(modelId, traceId);
 
-    const worker = this.#workers.get(resolved.runtimeKeyString);
-    if (!worker) {
-      throw new GatewayRequestError(
-        "worker_unavailable",
-        `Model ${modelId} could not be loaded for request execution.`,
-        503,
+    await this.acquireRequestTurn(resolved.runtimeKeyString, traceId);
+
+    try {
+      const warmWorker = this.getWorkerPool(resolved.runtimeKeyString).find(
+        (worker) => worker.state === "Ready" && worker.inflightRequests === 0,
       );
-    }
+      if (warmWorker) {
+        warmWorker.inflightRequests += 1;
+        warmWorker.lastUsedAt = Date.now();
+        warmWorker.state = "Busy";
+        this.publish(
+          this.createModelStateEvent(warmWorker.artifact, "Busy", {
+            previousState: "Ready",
+            reason: "Model is serving a request.",
+            runtimeKey: warmWorker.runtimeKey,
+            traceId,
+          }),
+        );
 
-    if (worker.state === "Busy" || worker.inflightRequests > 0) {
-      throw new GatewayRequestError(
-        "worker_busy",
-        `Model ${modelId} is busy handling another request.`,
-        429,
+        return warmWorker;
+      }
+
+      if (this.getWorkerSlotCount(resolved.runtimeKeyString) >= this.#maxWorkersPerModel) {
+        throw new GatewayRequestError(
+          "worker_busy",
+          `Model ${modelId} is busy handling another request.`,
+          429,
+        );
+      }
+
+      const worker = await this.loadWorker(resolved, traceId);
+      worker.inflightRequests += 1;
+      worker.lastUsedAt = Date.now();
+      worker.state = "Busy";
+      this.publish(
+        this.createModelStateEvent(worker.artifact, "Busy", {
+          previousState: "Ready",
+          reason: "Model is serving a request.",
+          runtimeKey: worker.runtimeKey,
+          traceId,
+        }),
       );
+
+      return worker;
+    } catch (error) {
+      this.releaseRequestTurn(resolved.runtimeKeyString);
+      throw error;
     }
-
-    worker.inflightRequests += 1;
-    worker.lastUsedAt = Date.now();
-    worker.state = "Busy";
-    this.publish(
-      this.createModelStateEvent(worker.artifact, "Busy", {
-        previousState: "Ready",
-        reason: "Model is serving a request.",
-        runtimeKey: worker.runtimeKey,
-        traceId,
-      }),
-    );
-
-    return worker;
   }
 
   private releaseWorkerAfterRequest(worker: ManagedWorker, traceId: string, reason: string): void {
-    if (!this.#workers.has(worker.runtimeKeyString)) {
-      return;
+    const workerPresent = this.getWorkerPool(worker.runtimeKeyString).includes(worker);
+
+    if (workerPresent) {
+      worker.inflightRequests = Math.max(0, worker.inflightRequests - 1);
+      if (worker.inflightRequests === 0 && worker.state !== "Unloading") {
+        const previousState = worker.state;
+        worker.lastUsedAt = Date.now();
+        worker.state = "Ready";
+        this.publish(
+          this.createModelStateEvent(worker.artifact, "Ready", {
+            previousState,
+            reason,
+            runtimeKey: worker.runtimeKey,
+            traceId,
+          }),
+        );
+        this.refreshModelSnapshot(worker.artifact, worker.runtimeKey, worker.runtimeKeyString);
+        this.refreshTtl(worker);
+      }
     }
 
-    worker.inflightRequests = Math.max(0, worker.inflightRequests - 1);
-    if (worker.inflightRequests > 0 || worker.state === "Unloading") {
-      return;
-    }
-
-    const previousState = worker.state;
-    worker.lastUsedAt = Date.now();
-    worker.state = "Ready";
-    this.publish(
-      this.createModelStateEvent(worker.artifact, "Ready", {
-        previousState,
-        reason,
-        runtimeKey: worker.runtimeKey,
-        traceId,
-      }),
-    );
-    this.refreshTtl(worker);
+    this.releaseRequestTurn(worker.runtimeKeyString);
   }
 
   private getWorkerBaseUrl(worker: ManagedWorker): string {
@@ -2499,10 +2867,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   private getResidentMemoryBytes(): number {
-    return Array.from(this.#workers.values()).reduce(
-      (total, worker) => total + worker.artifact.sizeBytes,
-      0,
-    );
+    return this.getAllWorkers().reduce((total, worker) => total + worker.artifact.sizeBytes, 0);
   }
 
   private getFailureState(runtimeKeyString: string): WorkerFailureState {
@@ -2636,7 +3001,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       return;
     }
 
-    const evictionCandidates = Array.from(this.#workers.values())
+    const evictionCandidates = this.getAllWorkers()
       .filter(
         (worker) =>
           worker.runtimeKeyString !== resolved.runtimeKeyString &&
@@ -2676,150 +3041,200 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async loadWorker(resolved: ResolvedModelRecord, traceId: string): Promise<ManagedWorker> {
     this.assertWorkerLoadAllowed(resolved, traceId);
-    const previousState = this.#modelSnapshots.get(resolved.artifact.id)?.state ?? "Idle";
-    this.publish(
-      this.createModelStateEvent(resolved.artifact, "Loading", {
-        previousState,
-        reason: "Model load requested.",
-        runtimeKey: resolved.runtimeKey,
-        traceId,
-      }),
-    );
-
-    try {
-      if (getArtifactStatus(resolved.artifact) === "missing") {
-        throw new Error(getMissingArtifactMessage(resolved.artifact));
-      }
-
-      await this.enforceResidentMemoryBudget(resolved, traceId);
-
-      const harness = await createLlamaCppHarness(this.#adapter, {
-        artifact: resolved.artifact,
-        profile: resolved.profile,
-        runtimeKey: resolved.runtimeKey,
-        supportRoot: this.#supportRoot,
-      });
-
-      if (this.#stopping) {
-        await harness.stop(this.#workerStopTimeoutMs).catch(() => undefined);
-        throw new GatewayRequestError(
-          "gateway_stopping",
-          "The gateway is shutting down and is not accepting new work.",
-          503,
-        );
-      }
-
-      const worker: ManagedWorker = {
-        artifact: resolved.artifact,
-        evictionTimer: undefined,
-        harness,
-        inflightRequests: 0,
-        intentionalStop: false,
-        lastUsedAt: Date.now(),
-        loadedAt: nowIso(),
-        profile: resolved.profile,
-        runtimeKey: resolved.runtimeKey,
-        runtimeKeyString: resolved.runtimeKeyString,
-        state: "Loading",
-      };
-
-      this.#workers.set(worker.runtimeKeyString, worker);
-      this.attachWorkerLogging(worker);
-      this.attachWorkerExitListener(worker);
-      this.persistEngineRecord(harness.command);
-
-      if (this.#stopping) {
-        await this.stopWorker(
-          worker,
-          traceId,
-          "Gateway shutdown interrupted model startup before readiness.",
-        );
-        throw new GatewayRequestError(
-          "gateway_stopping",
-          "The gateway is shutting down and is not accepting new work.",
-          503,
-        );
-      }
-
-      await Promise.race([
-        harness.waitForReady(DEFAULT_LOAD_TIMEOUT_MS),
-        new Promise<never>((_, reject) => {
-          harness.child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-            reject(
-              new Error(
-                `Worker exited before readiness (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
-              ),
-            );
-          });
-        }),
-      ]);
-
-      if (this.#stopping) {
-        await this.stopWorker(
-          worker,
-          traceId,
-          "Gateway shutdown interrupted model startup after readiness.",
-        );
-        throw new GatewayRequestError(
-          "gateway_stopping",
-          "The gateway is shutting down and is not accepting new work.",
-          503,
-        );
-      }
-
-      worker.loadedAt = nowIso();
-      worker.state = "Ready";
-      this.#modelsRepository.markLoaded(resolved.artifact.id, worker.loadedAt);
-      this.publishLog(
-        "info",
-        `Model ${resolved.artifact.id} is ready.`,
-        traceId,
-        resolved.artifact.id,
-        "gateway",
+    const pendingLoads = this.#loadPromises.get(resolved.runtimeKeyString) ?? new Set();
+    if (this.getWorkerSlotCount(resolved.runtimeKeyString) >= this.#maxWorkersPerModel) {
+      throw new GatewayRequestError(
+        "worker_busy",
+        `Model ${resolved.artifact.id} is busy handling another request.`,
+        429,
       );
-      this.publish(
-        this.createModelStateEvent(resolved.artifact, "Ready", {
-          previousState: "Loading",
-          reason: "Model is ready for requests.",
-          runtimeKey: resolved.runtimeKey,
-          traceId,
-        }),
-      );
-      this.refreshTtl(worker);
-      this.clearFailureState(resolved.runtimeKeyString);
-
-      return worker;
-    } catch (error) {
-      const activeWorker = this.#workers.get(resolved.runtimeKeyString);
-      if (activeWorker) {
-        activeWorker.intentionalStop = true;
-        activeWorker.evictionTimer?.refresh();
-        await activeWorker.harness.stop().catch(() => undefined);
-        this.#workers.delete(resolved.runtimeKeyString);
-      }
-
-      this.publishLog(
-        "error",
-        error instanceof Error ? error.message : "Worker failed during load.",
-        traceId,
-        resolved.artifact.id,
-        "gateway",
-      );
-      this.publish(
-        this.createModelStateEvent(resolved.artifact, "Crashed", {
-          previousState: "Loading",
-          reason: error instanceof Error ? error.message : "Worker load failed.",
-          runtimeKey: resolved.runtimeKey,
-          traceId,
-        }),
-      );
-      this.recordWorkerFailure(
-        resolved,
-        traceId,
-        error instanceof Error ? error.message : "Worker load failed.",
-      );
-      throw error;
     }
+
+    this.incrementPendingLoadReservation(resolved.runtimeKeyString);
+    let resolveLoad: (worker: ManagedWorker) => void = () => undefined;
+    let rejectLoad: (error: unknown) => void = () => undefined;
+    const loadPromise = new Promise<ManagedWorker>((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    });
+    pendingLoads.add(loadPromise);
+    this.#loadPromises.set(resolved.runtimeKeyString, pendingLoads);
+
+    let worker: ManagedWorker | undefined;
+    let reservationReleased = false;
+    const releaseReservation = () => {
+      if (reservationReleased) {
+        return;
+      }
+
+      reservationReleased = true;
+      this.decrementPendingLoadReservation(resolved.runtimeKeyString);
+    };
+
+    void (async () => {
+      const previousState = this.#modelSnapshots.get(resolved.artifact.id)?.state ?? "Idle";
+      this.publish(
+        this.createModelStateEvent(resolved.artifact, "Loading", {
+          previousState,
+          reason: "Model load requested.",
+          runtimeKey: resolved.runtimeKey,
+          traceId,
+        }),
+      );
+
+      try {
+        if (getArtifactStatus(resolved.artifact) === "missing") {
+          throw new Error(getMissingArtifactMessage(resolved.artifact));
+        }
+
+        await this.enforceResidentMemoryBudget(resolved, traceId);
+
+        const harness = await createLlamaCppHarness(this.#adapter, {
+          artifact: resolved.artifact,
+          profile: resolved.profile,
+          runtimeKey: resolved.runtimeKey,
+          supportRoot: this.#supportRoot,
+        });
+
+        if (this.#stopping) {
+          await harness.stop(this.#workerStopTimeoutMs).catch(() => undefined);
+          throw new GatewayRequestError(
+            "gateway_stopping",
+            "The gateway is shutting down and is not accepting new work.",
+            503,
+          );
+        }
+
+        worker = {
+          artifact: resolved.artifact,
+          evictionTimer: undefined,
+          harness,
+          inflightRequests: 0,
+          intentionalStop: false,
+          lastUsedAt: Date.now(),
+          loadedAt: nowIso(),
+          profile: resolved.profile,
+          runtimeKey: resolved.runtimeKey,
+          runtimeKeyString: resolved.runtimeKeyString,
+          state: "Loading",
+        };
+
+        this.addWorkerToPool(worker);
+        releaseReservation();
+        this.attachWorkerLogging(worker);
+        this.attachWorkerExitListener(worker);
+        this.persistEngineRecord(harness.command);
+
+        if (this.#stopping) {
+          await this.stopWorker(
+            worker,
+            traceId,
+            "Gateway shutdown interrupted model startup before readiness.",
+          );
+          throw new GatewayRequestError(
+            "gateway_stopping",
+            "The gateway is shutting down and is not accepting new work.",
+            503,
+          );
+        }
+
+        await Promise.race([
+          harness.waitForReady(DEFAULT_LOAD_TIMEOUT_MS),
+          new Promise<never>((_, reject) => {
+            harness.child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+              reject(
+                new Error(
+                  `Worker exited before readiness (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
+                ),
+              );
+            });
+          }),
+        ]);
+
+        if (this.#stopping) {
+          await this.stopWorker(
+            worker,
+            traceId,
+            "Gateway shutdown interrupted model startup after readiness.",
+          );
+          throw new GatewayRequestError(
+            "gateway_stopping",
+            "The gateway is shutting down and is not accepting new work.",
+            503,
+          );
+        }
+
+        worker.loadedAt = nowIso();
+        worker.state = "Ready";
+        this.#modelsRepository.markLoaded(resolved.artifact.id, worker.loadedAt);
+        this.publishLog(
+          "info",
+          `Model ${resolved.artifact.id} is ready.`,
+          traceId,
+          resolved.artifact.id,
+          "gateway",
+        );
+        this.publish(
+          this.createModelStateEvent(resolved.artifact, "Ready", {
+            previousState: "Loading",
+            reason: "Model is ready for requests.",
+            runtimeKey: resolved.runtimeKey,
+            traceId,
+          }),
+        );
+        this.refreshTtl(worker);
+        this.clearFailureState(resolved.runtimeKeyString);
+        this.refreshModelSnapshot(
+          resolved.artifact,
+          resolved.runtimeKey,
+          resolved.runtimeKeyString,
+        );
+        resolveLoad(worker);
+      } catch (error) {
+        if (worker) {
+          worker.intentionalStop = true;
+          worker.evictionTimer?.refresh();
+          await worker.harness.stop().catch(() => undefined);
+          this.removeWorkerFromPool(worker);
+        }
+        releaseReservation();
+
+        this.publishLog(
+          "error",
+          error instanceof Error ? error.message : "Worker failed during load.",
+          traceId,
+          resolved.artifact.id,
+          "gateway",
+        );
+        this.publish(
+          this.createModelStateEvent(resolved.artifact, "Crashed", {
+            previousState: "Loading",
+            reason: error instanceof Error ? error.message : "Worker load failed.",
+            runtimeKey: resolved.runtimeKey,
+            traceId,
+          }),
+        );
+        this.recordWorkerFailure(
+          resolved,
+          traceId,
+          error instanceof Error ? error.message : "Worker load failed.",
+        );
+        this.refreshModelSnapshot(
+          resolved.artifact,
+          resolved.runtimeKey,
+          resolved.runtimeKeyString,
+          error instanceof Error ? error.message : "Worker load failed.",
+        );
+        rejectLoad(error);
+      } finally {
+        pendingLoads.delete(loadPromise);
+        if (pendingLoads.size === 0) {
+          this.#loadPromises.delete(resolved.runtimeKeyString);
+        }
+      }
+    })();
+
+    return await loadPromise;
   }
 
   private async stopWorker(worker: ManagedWorker, traceId: string, reason: string): Promise<void> {
@@ -2849,7 +3264,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         "gateway",
       );
     });
-    this.#workers.delete(worker.runtimeKeyString);
+    this.removeWorkerFromPool(worker);
 
     this.publish(
       this.createModelStateEvent(worker.artifact, "CoolingDown", {
@@ -2859,12 +3274,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         traceId,
       }),
     );
-    this.#modelSnapshots.set(worker.artifact.id, {
-      loaded: false,
-      runtimeKey: worker.runtimeKey,
-      state: "Idle",
-      updatedAt: nowIso(),
-    });
+    this.refreshModelSnapshot(worker.artifact, worker.runtimeKey, worker.runtimeKeyString);
   }
 
   private refreshTtl(worker: ManagedWorker): void {
@@ -2940,7 +3350,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         worker.evictionTimer = undefined;
       }
 
-      this.#workers.delete(worker.runtimeKeyString);
+      this.removeWorkerFromPool(worker);
       this.publishLog(
         "error",
         `Worker exited unexpectedly (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
@@ -2954,6 +3364,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           runtimeKeyString: worker.runtimeKeyString,
         },
         normalizeTraceId(undefined),
+        `Worker exited unexpectedly (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
+      );
+      this.refreshModelSnapshot(
+        worker.artifact,
+        worker.runtimeKey,
+        worker.runtimeKeyString,
         `Worker exited unexpectedly (${code ?? "null"}${signal ? `, ${signal}` : ""}).`,
       );
       this.publish(
@@ -3027,10 +3443,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   private createMetricsEvent(): GatewayEvent {
-    const activeWorkers = Array.from(this.#modelSnapshots.values()).filter(
-      (snapshot) => snapshot.loaded,
-    ).length;
+    const activeWorkers = this.getAllWorkers().length;
     const residentMemoryBytes = this.getResidentMemoryBytes();
+    const queuedRequests = this.getAllLoadPromises().length + this.getTotalQueuedRequestCount();
 
     return {
       type: "METRICS_TICK",
@@ -3038,7 +3453,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       traceId: normalizeTraceId(undefined),
       payload: {
         activeWorkers,
-        queuedRequests: this.#loadPromises.size,
+        queuedRequests,
         residentMemoryBytes,
         gpuMemoryBytes: 0,
       },
