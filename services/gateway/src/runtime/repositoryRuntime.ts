@@ -2162,6 +2162,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     const startedAt = Date.now();
     let firstChunkAt: number | undefined;
     let settled = false;
+    const accumulator = createStreamedAssistantAccumulator();
 
     try {
       const response = await this.fetchWorkerResponse(worker, "/v1/chat/completions", {
@@ -2179,6 +2180,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       const reader = response.body.getReader();
       const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
       const finalize = (reason: string) => {
         if (settled) {
           return;
@@ -2206,17 +2209,76 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                   firstChunkAt = Date.now();
                 }
 
+                sseBuffer += decoder.decode(value, { stream: true });
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  let parsedJson: unknown;
+                  try {
+                    parsedJson = JSON.parse(data);
+                  } catch {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(
+                    this.#adapter.normalizeResponse(parsedJson),
+                  );
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+
                 controller.enqueue(value);
               }
 
+              const remaining = decoder.decode();
+              if (remaining.length > 0) {
+                sseBuffer += remaining;
+                sseBuffer = drainSseBuffer(sseBuffer, (data) => {
+                  if (data === "[DONE]") {
+                    return;
+                  }
+
+                  let parsedJson: unknown;
+                  try {
+                    parsedJson = JSON.parse(data);
+                  } catch {
+                    return;
+                  }
+
+                  const parsed = chatCompletionsChunkSchema.safeParse(
+                    this.#adapter.normalizeResponse(parsedJson),
+                  );
+                  if (parsed.success) {
+                    applyChunkToAccumulator(accumulator, parsed.data);
+                  }
+                });
+              }
+
               controller.close();
+              const completionTokens =
+                accumulator.content.trim().length > 0
+                  ? countChatContentTokens(accumulator.content)
+                  : undefined;
+              const totalDurationMs = Date.now() - startedAt;
+              const safeDurationMs = Math.max(totalDurationMs, 1);
               this.insertApiLog({
                 traceId: context.traceId,
                 modelId: input.model,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
-                totalDurationMs: Date.now() - startedAt,
+                totalDurationMs,
+                ...(completionTokens !== undefined ? { completionTokens } : {}),
+                ...(completionTokens !== undefined
+                  ? {
+                      tokensPerSecond: Number(
+                        ((completionTokens * 1000) / safeDurationMs).toFixed(2),
+                      ),
+                    }
+                  : {}),
                 statusCode: response.status,
                 createdAt: nowIso(),
               });

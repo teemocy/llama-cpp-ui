@@ -926,6 +926,8 @@ describe("gateway stage 2 runtime", () => {
           endpoint: "/v1/chat/completions",
           modelId: fixtureModelArtifact.id,
           statusCode: 200,
+          completionTokens: expect.any(Number),
+          tokensPerSecond: expect.any(Number),
         }),
       ]),
     );
