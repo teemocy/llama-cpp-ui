@@ -222,9 +222,9 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
       <article className="hero-card compact-hero">
         <div>
           <span className="section-label">Discovery & downloads</span>
-          <h3>Provider catalog</h3>
-          <p>
-            Search repositories first, then load each repo manifest to choose a quantized build.
+          <h3>Model catalog</h3>
+          <p className="compact-hero-copy">
+            Search providers and model families, then open a result to choose a build.
           </p>
         </div>
         <div className="button-row">

@@ -347,6 +347,30 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+  padding: 20px 22px;
+}
+
+.compact-hero > div:first-child {
+  max-width: 520px;
+}
+
+.compact-hero-copy {
+  white-space: nowrap;
+}
+
+.compact-hero .button-row {
+  margin-top: 0;
+  flex-wrap: nowrap;
+  width: min(520px, 100%);
+}
+
+.compact-hero .text-input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.compact-hero .primary-button {
+  white-space: nowrap;
 }
 
 .info-card,
@@ -1615,6 +1639,16 @@ select {
   .compact-hero {
     flex-direction: column;
     align-items: flex-start;
+    padding: 20px;
+  }
+
+  .compact-hero-copy {
+    white-space: normal;
+  }
+
+  .compact-hero .button-row {
+    width: 100%;
+    flex-wrap: wrap;
   }
 
   .model-runtime-hero,
