@@ -148,7 +148,7 @@ function createReasoningChatStreamResponse(model: string): Response {
         {
           index: 0,
           delta: {
-            reasoning_content: "one two three four five six",
+            reasoning_content: "counterrevolutionary hyperparameterization metamorphosis",
           },
           finish_reason: null,
         },
@@ -163,7 +163,7 @@ function createReasoningChatStreamResponse(model: string): Response {
         {
           index: 0,
           delta: {
-            content: "final answer",
+            content: "finalization",
           },
           finish_reason: null,
         },
@@ -1145,7 +1145,7 @@ describe("gateway stage 2 runtime", () => {
 
     expect(log).toEqual(
       expect.objectContaining({
-        completionTokens: 8,
+        completionTokens: 17,
       }),
     );
     expect(log?.tokensPerSecond).toBeGreaterThan(0);

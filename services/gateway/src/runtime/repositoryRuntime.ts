@@ -105,6 +105,7 @@ import {
   chatContentHasImages,
   countChatContentTokens,
   createChatSessionTitle,
+  estimateTextTokens,
   formatChatContentSummary,
 } from "./chat-content.js";
 
@@ -744,12 +745,6 @@ function getChatUsage(response: ChatCompletionsResponse): {
       ? { totalTokens: response.usage.total_tokens }
       : {}),
   };
-}
-
-function countTextTokens(value: string | string[]): number {
-  const text = Array.isArray(value) ? value.join(" ") : value;
-  const trimmed = text.trim();
-  return trimmed.length === 0 ? 1 : trimmed.split(/\s+/).length;
 }
 
 function requestRequiresVision(messages: ChatCompletionsRequest["messages"]): boolean {
@@ -2266,7 +2261,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                 (part) => part.trim().length > 0,
               );
               const completionTokens =
-                completionParts.length > 0 ? countTextTokens(completionParts) : undefined;
+                completionParts.length > 0 ? estimateTextTokens(completionParts) : undefined;
               const totalDurationMs = Date.now() - startedAt;
               const safeDurationMs = Math.max(totalDurationMs, 1);
               this.insertApiLog({
@@ -2364,7 +2359,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         modelId: input.model,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
-        promptTokens: countTextTokens(input.input),
+        promptTokens: estimateTextTokens(input.input),
         totalDurationMs: Date.now() - startedAt,
         statusCode: response.status,
         createdAt: nowIso(),
