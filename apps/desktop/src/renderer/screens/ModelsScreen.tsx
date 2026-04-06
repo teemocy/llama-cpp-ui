@@ -640,15 +640,11 @@ export function ModelsScreen({
   return (
     <section className="screen-stack">
       <article className="hero-card model-runtime-hero">
-        <div>
+        <div className="model-runtime-hero-copy">
           <span className="section-label">Model library</span>
-          <h3>Manage a live local model end to end</h3>
-          <p>
-            Register a GGUF from disk, inspect real metadata, and move it between cold and ready
-            runtime states without leaving the desktop shell.
-          </p>
+          <h3>Local model readiness</h3>
         </div>
-        <div className="hero-actions">
+        <div className="hero-actions hero-actions-inline">
           <button className="primary-button" onClick={() => void handlePickImport()} type="button">
             Pick local GGUF
           </button>
@@ -658,7 +654,7 @@ export function ModelsScreen({
               <strong>{models.length}</strong>
             </div>
             <div className="hero-stat">
-              <span className="section-label">Ready now</span>
+              <span className="section-label">Ready</span>
               <strong>{models.filter((model) => model.state === "ready").length}</strong>
             </div>
           </div>
