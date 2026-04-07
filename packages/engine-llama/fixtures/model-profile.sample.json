@@ -10,7 +10,8 @@
   "role": "chat",
   "parameterOverrides": {
     "contextLength": 8192,
-    "gpuLayers": 99
+    "gpuLayers": 99,
+    "parallelSlots": 8
   },
   "createdAt": "2026-04-01T00:00:00.000Z",
   "updatedAt": "2026-04-01T00:00:00.000Z"

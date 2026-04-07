@@ -91,6 +91,7 @@
     "defaults": {
       "contextLength": 8192,
       "gpuLayers": 99,
+      "parallelSlots": 8,
       "ttlMs": 900000
     },
     "labels": ["default"]

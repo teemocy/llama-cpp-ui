@@ -272,6 +272,7 @@ export function ModelsScreen({
     defaultTtlMinutes: "15",
     contextLength: "",
     gpuLayers: "",
+    parallelSlots: "",
     capabilityOverrides: createCapabilityDraft({}),
   });
 
@@ -340,6 +341,7 @@ export function ModelsScreen({
       defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
       contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
+      parallelSlots: selectedModel.parallelSlots ? String(selectedModel.parallelSlots) : "",
       capabilityOverrides,
     });
   }, [selectedModel?.id]);
@@ -616,6 +618,9 @@ export function ModelsScreen({
         ...(configDraft.gpuLayers.trim()
           ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
           : {}),
+        ...(configDraft.parallelSlots.trim()
+          ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
+          : {}),
         capabilityOverrides: toCapabilityOverrides(configDraft.capabilityOverrides),
       });
       setConfigDraft({
@@ -623,6 +628,7 @@ export function ModelsScreen({
         defaultTtlMinutes: String(Math.max(1, Math.round(result.model.defaultTtlMs / 60_000))),
         contextLength: result.model.contextLength ? String(result.model.contextLength) : "",
         gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
+        parallelSlots: result.model.parallelSlots ? String(result.model.parallelSlots) : "",
         capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
       });
       setFeedback({
@@ -867,6 +873,10 @@ export function ModelsScreen({
                     <dd>{selectedModel.gpuLayers ?? "Auto"}</dd>
                   </div>
                   <div>
+                    <dt>Parallel slots</dt>
+                    <dd>{selectedModel.parallelSlots ?? "Auto"}</dd>
+                  </div>
+                  <div>
                     <dt>Engine version</dt>
                     <dd>{selectedModel.engineVersion ?? "Materializes on first preload"}</dd>
                   </div>
@@ -1083,6 +1093,25 @@ export function ModelsScreen({
                         type="number"
                         value={configDraft.gpuLayers}
                       />
+                    </label>
+                    <label className="field-stack">
+                      <span className="section-label">Parallel slots</span>
+                      <input
+                        className="text-input"
+                        disabled={!canSaveConfig}
+                        min="1"
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            parallelSlots: event.target.value,
+                          }))
+                        }
+                        type="number"
+                        value={configDraft.parallelSlots}
+                      />
+                      <p className="detail-meta-note">
+                        Maps to llama.cpp `--parallel`; higher values can increase memory use.
+                      </p>
                     </label>
                   </div>
 

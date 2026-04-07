@@ -94,6 +94,7 @@ export interface ModelParameterOverrides {
   contextLength?: number;
   batchSize?: number;
   gpuLayers?: number;
+  parallelSlots?: number;
   tensorSplit?: number[];
   temperature?: number;
   topP?: number;

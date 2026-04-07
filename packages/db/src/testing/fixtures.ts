@@ -60,6 +60,7 @@ export const fixtureModelProfile: ModelProfile = {
   role: "chat",
   parameterOverrides: {
     temperature: 0.2,
+    parallelSlots: 4,
   },
   createdAt: FIXTURE_TIMESTAMP,
   updatedAt: FIXTURE_TIMESTAMP,

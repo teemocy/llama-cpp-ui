@@ -717,6 +717,7 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
@@ -1129,6 +1130,11 @@ function toDesktopModelRecord(
     Number.isFinite(profile.parameterOverrides.gpuLayers) &&
     profile.parameterOverrides.gpuLayers > 0
       ? { gpuLayers: Math.floor(profile.parameterOverrides.gpuLayers) }
+      : {}),
+    ...(typeof profile.parameterOverrides.parallelSlots === "number" &&
+    Number.isFinite(profile.parameterOverrides.parallelSlots) &&
+    profile.parameterOverrides.parallelSlots > 0
+      ? { parallelSlots: Math.floor(profile.parameterOverrides.parallelSlots) }
       : {}),
     ...(stored.artifact.source.checksumSha256
       ? { checksumSha256: stored.artifact.source.checksumSha256 }
@@ -1996,6 +2002,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         ...resolved.profile.parameterOverrides,
         ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
         ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       },
       ...(input.capabilityOverrides !== undefined
         ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }

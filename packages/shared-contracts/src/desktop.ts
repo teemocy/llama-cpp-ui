@@ -116,6 +116,7 @@ export const desktopModelRecordSchema = z.object({
   parameterCount: z.number().int().nonnegative().optional(),
   tokenizer: nonEmptyStringSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
+  parallelSlots: positiveIntegerSchema.optional(),
   checksumSha256: nonEmptyStringSchema.optional(),
   engineVersion: nonEmptyStringSchema.optional(),
   engineChannel: desktopEngineChannelSchema.optional(),
@@ -146,6 +147,7 @@ export const desktopModelConfigUpdateRequestSchema = z.object({
   defaultTtlMs: positiveIntegerSchema.optional(),
   contextLength: positiveIntegerSchema.optional(),
   gpuLayers: positiveIntegerSchema.optional(),
+  parallelSlots: positiveIntegerSchema.optional(),
   capabilityOverrides: capabilityOverridesSchema.optional(),
 });
 

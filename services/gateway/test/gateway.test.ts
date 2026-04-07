@@ -353,6 +353,7 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         gpuLayers: 16,
+        parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
           chat: false,
@@ -369,6 +370,7 @@ describe("gateway skeleton", () => {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
         gpuLayers: 16,
+        parallelSlots: 6,
         pinned: true,
         capabilityOverrides: {
           chat: false,

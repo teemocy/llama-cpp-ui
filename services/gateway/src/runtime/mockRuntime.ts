@@ -195,6 +195,7 @@ function hasRuntimeAffectingModelConfigChanges(
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
@@ -1200,6 +1201,7 @@ export class MockGatewayRuntime {
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+      ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       ...(input.capabilityOverrides !== undefined
         ? {
             capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides),
@@ -1550,6 +1552,7 @@ export class MockGatewayRuntime {
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
       gpuLayers: existing?.gpuLayers ?? 20,
+      parallelSlots: existing?.parallelSlots,
       quantization: existing?.quantization ?? "Q4_K_M",
       architecture: existing?.architecture ?? "llama",
       tokenizer: existing?.tokenizer ?? "gpt2",

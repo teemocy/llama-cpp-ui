@@ -105,6 +105,15 @@ function getGpuLayers(profile: ModelProfile): number | undefined {
   return undefined;
 }
 
+function getParallelSlots(profile: ModelProfile): number | undefined {
+  const overrideValue = profile.parameterOverrides.parallelSlots;
+  if (isFinitePositiveNumber(overrideValue)) {
+    return Math.floor(overrideValue);
+  }
+
+  return undefined;
+}
+
 function deriveCapabilities(artifact: ModelArtifact): CapabilitySet {
   return {
     ...artifact.capabilities,
@@ -172,6 +181,11 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
   const gpuLayers = getGpuLayers(input.profile);
   if (gpuLayers !== undefined) {
     args.push("--n-gpu-layers", String(gpuLayers));
+  }
+
+  const parallelSlots = getParallelSlots(input.profile);
+  if (parallelSlots !== undefined) {
+    args.push("--parallel", String(parallelSlots));
   }
 
   if (input.runtimeKey.role === "embeddings") {
