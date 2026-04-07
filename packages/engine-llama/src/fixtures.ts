@@ -55,6 +55,7 @@ export const LLAMA_CPP_FIXTURE_PROFILE: ModelProfile = {
   role: "chat",
   parameterOverrides: {
     contextLength: 8192,
+    batchSize: 3072,
     gpuLayers: 99,
   },
   createdAt: FIXTURE_TS,

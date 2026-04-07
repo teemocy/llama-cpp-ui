@@ -45,6 +45,7 @@ const LLAMA_CPP_ENGINE_TYPE = "llama.cpp";
 const LLAMA_CPP_BINARY_CANDIDATES = ["llama-server", "server"] as const;
 const DEFAULT_FAKE_VERSION_TAG = "stage1-fixture";
 const DEFAULT_FAKE_BASE_PORT = 46_000;
+const DEFAULT_BATCH_SIZE = 3_072;
 const PROMPT_CACHE_DIRNAME = "prompt-caches";
 
 interface RuntimePlan {
@@ -103,6 +104,15 @@ function getGpuLayers(profile: ModelProfile): number | undefined {
   }
 
   return undefined;
+}
+
+function getBatchSize(profile: ModelProfile): number {
+  const overrideValue = profile.parameterOverrides.batchSize;
+  if (isFinitePositiveNumber(overrideValue)) {
+    return Math.floor(overrideValue);
+  }
+
+  return DEFAULT_BATCH_SIZE;
 }
 
 function getParallelSlots(profile: ModelProfile): number | undefined {
@@ -176,6 +186,8 @@ function buildBinaryArgs(input: ResolveCommandInput, host: string, port: number)
     String(port),
     "--ctx-size",
     String(getContextLength(input.artifact, input.profile)),
+    "--batch-size",
+    String(getBatchSize(input.profile)),
   ];
 
   const gpuLayers = getGpuLayers(input.profile);

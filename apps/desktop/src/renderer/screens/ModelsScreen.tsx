@@ -271,6 +271,7 @@ export function ModelsScreen({
     pinned: false,
     defaultTtlMinutes: "15",
     contextLength: "",
+    batchSize: "",
     gpuLayers: "",
     parallelSlots: "",
     capabilityOverrides: createCapabilityDraft({}),
@@ -340,6 +341,7 @@ export function ModelsScreen({
       pinned: selectedModel.pinned,
       defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
       contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
+      batchSize: String(selectedModel.batchSize ?? 3072),
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
       parallelSlots: selectedModel.parallelSlots ? String(selectedModel.parallelSlots) : "",
       capabilityOverrides,
@@ -615,6 +617,9 @@ export function ModelsScreen({
         ...(configDraft.contextLength.trim()
           ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
           : {}),
+        ...(configDraft.batchSize.trim()
+          ? { batchSize: Number.parseInt(configDraft.batchSize, 10) }
+          : {}),
         ...(configDraft.gpuLayers.trim()
           ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
           : {}),
@@ -627,6 +632,7 @@ export function ModelsScreen({
         pinned: result.model.pinned,
         defaultTtlMinutes: String(Math.max(1, Math.round(result.model.defaultTtlMs / 60_000))),
         contextLength: result.model.contextLength ? String(result.model.contextLength) : "",
+        batchSize: String(result.model.batchSize ?? 3072),
         gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
         parallelSlots: result.model.parallelSlots ? String(result.model.parallelSlots) : "",
         capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
@@ -857,6 +863,10 @@ export function ModelsScreen({
                     <dd>{selectedModel.contextLength ?? "Unknown"}</dd>
                   </div>
                   <div>
+                    <dt>Batch size</dt>
+                    <dd>{selectedModel.batchSize ?? 3072}</dd>
+                  </div>
+                  <div>
                     <dt>Parameter count</dt>
                     <dd>{selectedModel.parameterCount?.toLocaleString() ?? "Unknown"}</dd>
                   </div>
@@ -1077,6 +1087,26 @@ export function ModelsScreen({
                         type="number"
                         value={configDraft.contextLength}
                       />
+                    </label>
+                    <label className="field-stack">
+                      <span className="section-label">Batch size</span>
+                      <input
+                        className="text-input"
+                        disabled={!canSaveConfig}
+                        min="1"
+                        onChange={(event) =>
+                          setConfigDraft((current) => ({
+                            ...current,
+                            batchSize: event.target.value,
+                          }))
+                        }
+                        type="number"
+                        value={configDraft.batchSize}
+                      />
+                      <p className="detail-meta-note">
+                        Maps to llama.cpp `--batch-size`; this raises the logical batch limit to
+                        3072.
+                      </p>
                     </label>
                     <label className="field-stack">
                       <span className="section-label">GPU layers</span>

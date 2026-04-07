@@ -352,6 +352,7 @@ describe("gateway skeleton", () => {
       payload: {
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
+        batchSize: 3072,
         gpuLayers: 16,
         parallelSlots: 6,
         pinned: true,
@@ -369,6 +370,7 @@ describe("gateway skeleton", () => {
         id: "localhub/tinyllama-1.1b-chat-q4",
         defaultTtlMs: 1_800_000,
         contextLength: 4096,
+        batchSize: 3072,
         gpuLayers: 16,
         parallelSlots: 6,
         pinned: true,

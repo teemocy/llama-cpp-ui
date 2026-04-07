@@ -75,6 +75,7 @@ interface ModelStateEventOptions {
 
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH = "stage1-mock";
+const DEFAULT_BATCH_SIZE = 3_072;
 const MOCK_RESIDENT_MEMORY_BYTES = 2_147_483_648;
 const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
 const CAPABILITY_OVERRIDE_KEYS = [
@@ -194,6 +195,7 @@ function hasRuntimeAffectingModelConfigChanges(
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.capabilityOverrides !== undefined
@@ -1200,6 +1202,7 @@ export class MockGatewayRuntime {
       ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
       ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
       ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+      ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
       ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
       ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       ...(input.capabilityOverrides !== undefined
@@ -1551,6 +1554,7 @@ export class MockGatewayRuntime {
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
+      batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
       gpuLayers: existing?.gpuLayers ?? 20,
       parallelSlots: existing?.parallelSlots,
       quantization: existing?.quantization ?? "Q4_K_M",

@@ -112,6 +112,7 @@ import {
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, "../../../../packages/db/migrations");
 const DEFAULT_ENGINE_TYPE = "llama.cpp";
 const DEFAULT_CONFIG_HASH_LENGTH = 12;
+const DEFAULT_BATCH_SIZE = 3_072;
 // Real `llama-server` startups can take a while on large GGUFs, so keep the
 // readiness window generous enough for local model loads.
 const DEFAULT_LOAD_TIMEOUT_MS = 60_000;
@@ -698,6 +699,15 @@ function getEffectiveContextLength(
   return artifact.metadata.contextLength;
 }
 
+function getEffectiveBatchSize(profile: ModelProfile): number {
+  const override = profile.parameterOverrides.batchSize;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+
+  return DEFAULT_BATCH_SIZE;
+}
+
 function getCreatedEpochSeconds(artifact: ModelArtifact): number {
   const timestamp = Date.parse(artifact.createdAt);
 
@@ -716,6 +726,7 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
   return (
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.capabilityOverrides !== undefined
@@ -1095,6 +1106,7 @@ function toDesktopModelRecord(
 ): DesktopModelRecord {
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
+  const batchSize = getEffectiveBatchSize(profile);
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1120,6 +1132,7 @@ function toDesktopModelRecord(
     ...(stored.artifact.architecture ? { architecture: stored.artifact.architecture } : {}),
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
+    batchSize,
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
@@ -2001,6 +2014,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       parameterOverrides: {
         ...resolved.profile.parameterOverrides,
         ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
         ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
         ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
       },
