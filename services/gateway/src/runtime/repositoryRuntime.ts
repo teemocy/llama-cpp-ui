@@ -133,16 +133,15 @@ const ENGINE_RECORD_CAPABILITIES: Partial<CapabilitySet> = {
   embeddings: true,
   streaming: true,
 };
-const CAPABILITY_OVERRIDE_KEYS: Array<keyof CapabilitySet> = [
+const CAPABILITY_OVERRIDE_KEYS: Array<Exclude<keyof CapabilitySet, "promptCache">> = [
   "chat",
   "embeddings",
-  "tools",
-  "streaming",
   "vision",
   "audioTranscription",
   "audioSpeech",
   "rerank",
-  "promptCache",
+  "tools",
+  "streaming",
 ];
 type CapabilityOverrides = NonNullable<ModelProfile["capabilityOverrides"]>;
 const QUANTIZATION_TOKEN_PATTERN =
@@ -549,7 +548,7 @@ function applyCapabilityOverrides(
     audioTranscription: normalizedOverrides.audioTranscription ?? capabilities.audioTranscription,
     audioSpeech: normalizedOverrides.audioSpeech ?? capabilities.audioSpeech,
     rerank: normalizedOverrides.rerank ?? capabilities.rerank,
-    promptCache: normalizedOverrides.promptCache ?? capabilities.promptCache,
+    promptCache: true,
   };
 }
 
@@ -571,7 +570,8 @@ function deriveRuntimeRole(capabilities: CapabilitySet): RuntimeEventRole {
 
 function getModelRole(artifact: ModelArtifact, profile?: ModelProfile): RuntimeEventRole {
   const capabilities = getEffectiveCapabilities(artifact, profile);
-  if (profile?.capabilityOverrides && Object.keys(profile.capabilityOverrides).length > 0) {
+  const normalizedOverrides = normalizeCapabilityOverrides(profile?.capabilityOverrides);
+  if (Object.keys(normalizedOverrides).length > 0) {
     return deriveRuntimeRole(capabilities);
   }
 

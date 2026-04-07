@@ -42,8 +42,7 @@ type CapabilityKey =
   | "vision"
   | "audioTranscription"
   | "audioSpeech"
-  | "rerank"
-  | "promptCache";
+  | "rerank";
 
 type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
 type FlashAttentionValue = "auto" | "enabled" | "disabled";
@@ -197,16 +196,6 @@ const capabilityDefinitions: Array<{
     description: "Vector search and embedding requests.",
   },
   {
-    key: "tools",
-    label: "Tools",
-    description: "Function calling and tool execution.",
-  },
-  {
-    key: "streaming",
-    label: "Streaming",
-    description: "Streaming chat and token-by-token responses.",
-  },
-  {
     key: "vision",
     label: "Vision",
     description: "Image inputs and multimodal prompts.",
@@ -227,9 +216,32 @@ const capabilityDefinitions: Array<{
     description: "Document reranking and relevance scoring.",
   },
   {
-    key: "promptCache",
-    label: "Prompt cache",
-    description: "Persistent prompt-cache reuse.",
+    key: "tools",
+    label: "Tools",
+    description: "Function calling and tool execution.",
+  },
+  {
+    key: "streaming",
+    label: "Streaming",
+    description: "Streaming chat and token-by-token responses.",
+  },
+];
+
+const capabilityToggleOptions: Array<{
+  label: string;
+  value: CapabilityToggleValue;
+}> = [
+  {
+    value: "inherit",
+    label: "Auto",
+  },
+  {
+    value: "enabled",
+    label: "Enabled",
+  },
+  {
+    value: "disabled",
+    label: "Disabled",
   },
 ];
 
@@ -283,7 +295,7 @@ const formatCapabilityToggle = (value: CapabilityToggleValue): string => {
     case "disabled":
       return "Disabled";
     default:
-      return "Inherit";
+      return "Auto";
   }
 };
 
@@ -887,116 +899,36 @@ export function ModelsScreen({
             </div>
 
             <div className="modal-panel" role="tabpanel">
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
+              <div className="advanced-config-card modal-section-card alias-config-card">
+                <div className="panel-header alias-panel-header">
+                  <div className="alias-header-copy">
                     <span className="section-label">Alias name</span>
-                    <h3>Rename this model</h3>
+                    <div className="alias-inline-row">
+                      <h3>Rename this model</h3>
+                      <input
+                        aria-label="Alias name"
+                        className="text-input alias-inline-input"
+                        disabled={!connected || pendingActionModelId !== null}
+                        onChange={(event) => setAliasDraft(event.target.value)}
+                        type="text"
+                        value={aliasDraft}
+                      />
+                      <button
+                        className="secondary-button alias-inline-save"
+                        disabled={
+                          !connected ||
+                          pendingActionModelId !== null ||
+                          aliasDraft.trim().length === 0 ||
+                          aliasDraft.trim() === selectedModel.displayName.trim()
+                        }
+                        onClick={() => void saveAlias()}
+                        type="button"
+                      >
+                        {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
+                      </button>
+                    </div>
                   </div>
                   <span className="status-pill status-pill-positive">No eviction needed</span>
-                </div>
-                <p>
-                  Give the model a friendly alias without touching the artifact name or restarting
-                  the worker.
-                </p>
-
-                <label className="field-stack">
-                  <span className="section-label">Alias name</span>
-                  <input
-                    className="text-input"
-                    disabled={!connected || pendingActionModelId !== null}
-                    onChange={(event) => setAliasDraft(event.target.value)}
-                    type="text"
-                    value={aliasDraft}
-                  />
-                </label>
-
-                <div className="button-row">
-                  <button
-                    className="secondary-button"
-                    disabled={
-                      !connected ||
-                      pendingActionModelId !== null ||
-                      aliasDraft.trim().length === 0 ||
-                      aliasDraft.trim() === selectedModel.displayName.trim()
-                    }
-                    onClick={() => void saveAlias()}
-                    type="button"
-                  >
-                    {pendingActionModelId === selectedModel.id ? "Saving..." : "Save alias"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="advanced-config-card modal-section-card">
-                <div className="panel-header">
-                  <div>
-                    <span className="section-label">Capability overrides</span>
-                    <h3>Force model abilities on or off</h3>
-                  </div>
-                  <span
-                    className={
-                      hasCapabilityOverrides
-                        ? "status-pill status-pill-caution"
-                        : "status-pill status-pill-neutral"
-                    }
-                  >
-                    {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
-                  </span>
-                </div>
-                <p>
-                  Leave a capability on <strong>Inherit</strong> to keep the heuristic default
-                  from the GGUF artifact. Explicit overrides are saved to the profile and apply on
-                  the next preload.
-                </p>
-
-                <div className="capability-override-list">
-                  {capabilityDefinitions.map(({ key, label, description }) => (
-                    <label className="capability-override-row" key={key}>
-                      <div className="capability-override-copy">
-                        <strong>{label}</strong>
-                        <span>{description}</span>
-                      </div>
-                      <select
-                        className="text-input capability-override-select"
-                        disabled={!canSaveConfig}
-                        onChange={(event) =>
-                          setConfigDraft((current) => ({
-                            ...current,
-                            capabilityOverrides: {
-                              ...current.capabilityOverrides,
-                              [key]: event.target.value as CapabilityToggleValue,
-                            },
-                          }))
-                        }
-                        value={configDraft.capabilityOverrides[key]}
-                      >
-                        <option value="inherit">Inherit</option>
-                        <option value="enabled">Enabled</option>
-                        <option value="disabled">Disabled</option>
-                      </select>
-                    </label>
-                  ))}
-                </div>
-
-                <div className="capability-override-summary">
-                  <span className="section-label">Current overrides</span>
-                  <div className="pill-row">
-                    {hasCapabilityOverrides ? (
-                      capabilityDefinitions
-                        .filter(({ key }) => selectedModel.capabilityOverrides[key] !== undefined)
-                        .map(({ key, label }) => {
-                          const value = selectedModel.capabilityOverrides[key];
-                          return (
-                            <span className="meta-pill" key={key}>
-                              {label}: {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
-                            </span>
-                          );
-                        })
-                    ) : (
-                      <span className="meta-pill meta-pill-muted">No explicit overrides</span>
-                    )}
-                  </div>
                 </div>
               </div>
 
@@ -1146,6 +1078,102 @@ export function ModelsScreen({
                       ? "Saving..."
                       : "Save advanced settings"}
                   </button>
+                </div>
+              </div>
+
+              <div className="advanced-config-card modal-section-card">
+                <div className="panel-header">
+                  <div>
+                    <span className="section-label">Capability overrides</span>
+                    <h3>Force model abilities on or off</h3>
+                  </div>
+                  <span
+                    className={
+                      hasCapabilityOverrides
+                        ? "status-pill status-pill-caution"
+                        : "status-pill status-pill-neutral"
+                    }
+                  >
+                    {hasCapabilityOverrides ? "Overrides active" : "Using defaults"}
+                  </span>
+                </div>
+                <p>
+                  Leave a capability on <strong>Auto</strong> to keep the detected default from
+                  the GGUF artifact. Explicit overrides are saved to the profile and apply on the
+                  next preload.
+                </p>
+
+                <div className="capability-override-list">
+                  {capabilityDefinitions.map(({ key, label, description }) => (
+                    <div className="capability-override-row" key={key}>
+                      <div className="capability-override-copy">
+                        <strong>{label}</strong>
+                        <span>{description}</span>
+                      </div>
+                      <div
+                        aria-label={`${label} capability override`}
+                        className="capability-toggle-group"
+                        role="group"
+                      >
+                        {capabilityToggleOptions.map((option) => {
+                          const isSelected = configDraft.capabilityOverrides[key] === option.value;
+                          const optionTone =
+                            option.value === "inherit"
+                              ? "auto"
+                              : option.value === "enabled"
+                                ? "enabled"
+                                : "disabled";
+
+                          return (
+                            <button
+                              aria-pressed={isSelected}
+                              className={[
+                                "capability-toggle-button",
+                                `capability-toggle-button-${optionTone}`,
+                                isSelected ? "capability-toggle-button-selected" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                              disabled={!canSaveConfig}
+                              key={option.value}
+                              onClick={() =>
+                                setConfigDraft((current) => ({
+                                  ...current,
+                                  capabilityOverrides: {
+                                    ...current.capabilityOverrides,
+                                    [key]: option.value,
+                                  },
+                                }))
+                              }
+                              type="button"
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="capability-override-summary">
+                  <span className="section-label">Current overrides</span>
+                  <div className="pill-row">
+                    {hasCapabilityOverrides ? (
+                      capabilityDefinitions
+                        .filter(({ key }) => selectedModel.capabilityOverrides[key] !== undefined)
+                        .map(({ key, label }) => {
+                          const value = selectedModel.capabilityOverrides[key];
+                          return (
+                            <span className="meta-pill" key={key}>
+                              {label}: {formatCapabilityToggle(value === true ? "enabled" : "disabled")}
+                            </span>
+                          );
+                        })
+                    ) : (
+                      <span className="meta-pill meta-pill-muted">No explicit overrides</span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

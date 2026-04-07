@@ -1058,6 +1058,52 @@ select {
   border: 1px solid rgba(20, 33, 61, 0.08);
 }
 
+.alias-config-card {
+  padding-bottom: 12px;
+}
+
+.alias-panel-header {
+  align-items: center;
+}
+
+.alias-header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.alias-inline-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.alias-inline-row h3 {
+  margin: 0;
+}
+
+.alias-inline-input {
+  width: min(100%, 520px);
+  padding: 10px 12px;
+}
+
+.alias-inline-save {
+  padding: 10px 14px;
+  white-space: nowrap;
+}
+
+.alias-inline-row .text-input {
+  min-width: 360px;
+  flex: 1 1 360px;
+}
+
+.alias-inline-row .secondary-button {
+  flex: 0 0 auto;
+}
+
 .modal-panel .advanced-config-card p {
   margin-top: 6px;
   color: var(--muted);
@@ -1231,17 +1277,17 @@ select {
 .capability-override-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .capability-override-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 160px;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
   align-items: center;
-  padding: 12px;
-  border-radius: 18px;
+  padding: 10px 12px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.64);
   border: 1px solid rgba(20, 33, 61, 0.08);
 }
@@ -1249,24 +1295,82 @@ select {
 .capability-override-copy {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .capability-override-copy strong {
   color: var(--ink);
+  font-size: 0.94rem;
 }
 
 .capability-override-copy span {
   color: var(--muted);
-  font-size: 0.88rem;
+  font-size: 0.82rem;
+  line-height: 1.25;
 }
 
-.capability-override-select {
-  min-width: 0;
+.capability-toggle-group {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(20, 33, 61, 0.04);
+}
+
+.capability-toggle-button {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 6px 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.capability-toggle-button:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.capability-toggle-button:focus-visible {
+  outline: 2px solid rgba(184, 111, 34, 0.28);
+  outline-offset: 1px;
+}
+
+.capability-toggle-button-selected {
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  box-shadow: 0 8px 16px rgba(20, 33, 61, 0.08);
+}
+
+.capability-toggle-button-auto.capability-toggle-button-selected {
+  background: rgba(184, 111, 34, 0.12);
+  color: #8a561a;
+}
+
+.capability-toggle-button-enabled.capability-toggle-button-selected {
+  background: rgba(47, 125, 93, 0.14);
+  color: #1e6d4f;
+}
+
+.capability-toggle-button-disabled.capability-toggle-button-selected {
+  background: rgba(178, 67, 44, 0.12);
+  color: #9d2b20;
+}
+
+.capability-toggle-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 
 .capability-override-summary {
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .chat-layout {
@@ -1779,6 +1883,24 @@ select {
 
   .capability-override-row {
     grid-template-columns: 1fr;
+  }
+
+  .alias-inline-row {
+    align-items: stretch;
+  }
+
+  .alias-inline-input,
+  .alias-inline-save {
+    width: 100%;
+  }
+
+  .alias-inline-row .text-input {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .alias-inline-row .secondary-button {
+    width: 100%;
   }
 
   .hero-stat-grid {

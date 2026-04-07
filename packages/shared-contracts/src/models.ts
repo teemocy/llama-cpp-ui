@@ -40,7 +40,7 @@ export const capabilitySetSchema = z.object({
   promptCache: z.boolean(),
 });
 
-export const capabilityOverridesSchema = capabilitySetSchema.partial();
+export const capabilityOverridesSchema = capabilitySetSchema.omit({ promptCache: true }).partial();
 
 export const flashAttentionTypeSchema = z.enum(["auto", "enabled", "disabled"]);
 

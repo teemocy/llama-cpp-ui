@@ -82,13 +82,12 @@ const MOCK_GPU_MEMORY_BYTES = 1_073_741_824;
 const CAPABILITY_OVERRIDE_KEYS = [
   "chat",
   "embeddings",
-  "tools",
-  "streaming",
   "vision",
   "audioTranscription",
   "audioSpeech",
   "rerank",
-  "promptCache",
+  "tools",
+  "streaming",
 ] as const;
 const CAPABILITY_LABELS = {
   chat: "chat",
@@ -139,7 +138,9 @@ function createModel(id: string, created: number, capabilities: string[]): Runti
     owned_by: "localhub",
     loaded: false,
     state: "Idle",
-    capabilities,
+    capabilities: capabilities.includes(CAPABILITY_LABELS.promptCache)
+      ? capabilities
+      : [...capabilities, CAPABILITY_LABELS.promptCache],
   };
 }
 
@@ -181,9 +182,12 @@ function applyCapabilityOverridesToLabels(
     }
   }
 
-  return CAPABILITY_OVERRIDE_KEYS.map((key) => CAPABILITY_LABELS[key]).filter((label) =>
-    current.has(label),
-  );
+  return [
+    ...CAPABILITY_OVERRIDE_KEYS.map((key) => CAPABILITY_LABELS[key]).filter((label) =>
+      current.has(label),
+    ),
+    CAPABILITY_LABELS.promptCache,
+  ];
 }
 
 function createTraceId(traceId?: string): string {
