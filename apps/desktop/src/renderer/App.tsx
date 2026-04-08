@@ -383,7 +383,7 @@ export function App() {
       <div className="app-shell">
         <header className="app-header">
           <div className="app-header-brand">
-            <h1>LLM Hub</h1>
+            <h1>LM Hub</h1>
           </div>
           <div className="app-header-aside">
             <p className="app-header-description">
@@ -437,7 +437,9 @@ export function App() {
               </div>
             </div>
             {shellState.message ? <p>{shellState.message}</p> : null}
-            <small className="gateway-last-event">Last event: {formatClock(shellState.lastEventAt)}</small>
+            <small className="gateway-last-event">
+              Last event: {formatClock(shellState.lastEventAt)}
+            </small>
           </section>
         </aside>
 
