@@ -9,7 +9,7 @@ import type {
   DesktopModelRecord,
   DesktopShellState,
 } from "@localhub/shared-contracts";
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
 
 type ModelsScreenProps = {
   engines: DesktopEngineRecord[];
@@ -435,7 +435,7 @@ export function ModelsScreen({
       return;
     }
 
-    const handleKeyDown = (event: KeyboardEvent) => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setIsDetailModalOpen(false);
       }
@@ -476,7 +476,10 @@ export function ModelsScreen({
     setIsConfigModalOpen(false);
   };
 
-  const handleModelCardKeyDown = (event: KeyboardEvent<HTMLDivElement>, modelId: string) => {
+  const handleModelCardKeyDown = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    modelId: string,
+  ) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       selectModel(modelId);

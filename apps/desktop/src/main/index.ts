@@ -273,6 +273,9 @@ const registerIpcHandlers = (): void => {
     gatewayManager.deleteChatSession(sessionId),
   );
   ipcMain.handle(IPC_CHANNELS.gatewayRunChat, (_event, payload) => gatewayManager.runChat(payload));
+  ipcMain.handle(IPC_CHANNELS.gatewayCancelChat, (_event, clientRequestId: string) =>
+    gatewayManager.cancelChat(clientRequestId),
+  );
   ipcMain.handle(IPC_CHANNELS.gatewayListApiLogs, (_event, limit?: number) =>
     gatewayManager.listApiLogs(limit),
   );
