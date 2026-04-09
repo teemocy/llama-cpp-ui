@@ -21,6 +21,7 @@ type DesktopRuntimeContext = {
     enableLan: boolean;
     authRequired: boolean;
     publicHost: string;
+    publicPort: number;
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
@@ -40,6 +41,10 @@ type SettingsScreenProps = {
   onPickModelsDirectory(): Promise<string | null>;
   onRestartGateway(): Promise<void>;
   onShutdownGateway(): Promise<void>;
+  onUpdateGatewayListenerSettings(payload: {
+    publicHost: string;
+    publicPort: number;
+  }): Promise<void>;
   onUpdateControlAuthSettings(payload: {
     headerName: ControlAuthHeaderName;
     token: string;
@@ -49,6 +54,11 @@ type SettingsScreenProps = {
 
 const FIRST_RUN_KEY = "localhub.desktop.stage4.firstRunDismissed";
 
+const isLoopbackHost = (host: string): boolean => {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+};
+
 export function SettingsScreen({
   shellState,
   paths,
@@ -56,14 +66,19 @@ export function SettingsScreen({
   onPickModelsDirectory,
   onRestartGateway,
   onShutdownGateway,
+  onUpdateGatewayListenerSettings,
   onUpdateControlAuthSettings,
   onUpdateModelsDirectory,
 }: SettingsScreenProps) {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [busyAction, setBusyAction] = useState<
-    "restart" | "shutdown" | "models-dir" | "auth-settings" | null
+    "restart" | "shutdown" | "listener-settings" | "models-dir" | "auth-settings" | null
   >(null);
   const [pathFeedback, setPathFeedback] = useState<{
+    tone: "success" | "error";
+    text: string;
+  } | null>(null);
+  const [listenerFeedback, setListenerFeedback] = useState<{
     tone: "success" | "error";
     text: string;
   } | null>(null);
@@ -72,6 +87,8 @@ export function SettingsScreen({
     text: string;
   } | null>(null);
   const [modelsDirDraft, setModelsDirDraft] = useState("");
+  const [publicHostDraft, setPublicHostDraft] = useState("");
+  const [publicPortDraft, setPublicPortDraft] = useState("");
   const [controlAuthHeaderDraft, setControlAuthHeaderDraft] =
     useState<ControlAuthHeaderName>("authorization");
   const [controlAuthTokenDraft, setControlAuthTokenDraft] = useState("");
@@ -86,6 +103,13 @@ export function SettingsScreen({
       setModelsDirDraft(runtimeContext.gateway.localModelsDir);
     }
   }, [runtimeContext?.gateway.localModelsDir]);
+
+  useEffect(() => {
+    if (runtimeContext?.gateway.publicHost) {
+      setPublicHostDraft(runtimeContext.gateway.publicHost);
+      setPublicPortDraft(String(runtimeContext.gateway.publicPort));
+    }
+  }, [runtimeContext?.gateway.publicHost, runtimeContext?.gateway.publicPort]);
 
   useEffect(() => {
     if (runtimeContext?.desktop.controlAuthHeaderName) {
@@ -153,6 +177,49 @@ export function SettingsScreen({
     }
   };
 
+  const saveGatewayListenerSettings = async () => {
+    const nextPublicHost = publicHostDraft.trim();
+    const nextPublicPort = Number.parseInt(publicPortDraft, 10);
+
+    setListenerFeedback(null);
+
+    if (!nextPublicHost) {
+      setListenerFeedback({
+        tone: "error",
+        text: "Choose a listening address before saving.",
+      });
+      return;
+    }
+
+    if (!Number.isInteger(nextPublicPort) || nextPublicPort < 1 || nextPublicPort > 65535) {
+      setListenerFeedback({
+        tone: "error",
+        text: "Choose a port between 1 and 65535.",
+      });
+      return;
+    }
+
+    setBusyAction("listener-settings");
+
+    try {
+      await onUpdateGatewayListenerSettings({
+        publicHost: nextPublicHost,
+        publicPort: nextPublicPort,
+      });
+      setListenerFeedback({
+        tone: "success",
+        text: "Gateway restarted and is listening on the new public address.",
+      });
+    } catch (error) {
+      setListenerFeedback({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Unable to update the public listener.",
+      });
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const saveControlAuthSettings = async () => {
     if (!runtimeContext) {
       return;
@@ -186,18 +253,38 @@ export function SettingsScreen({
     modelsDirDraft.trim().length > 0 &&
     modelsDirDraft.trim() !== runtimeContext.gateway.localModelsDir;
 
+  const normalizedPublicHost = publicHostDraft.trim();
+  const parsedPublicPort = Number.parseInt(publicPortDraft, 10);
+  const publicListenerIsLoopback = runtimeContext
+    ? isLoopbackHost(runtimeContext.gateway.publicHost)
+    : true;
+  const publicListenerExposed = runtimeContext ? !publicListenerIsLoopback : false;
+  const canSaveGatewayListenerSettings =
+    runtimeContext !== null &&
+    busyAction === null &&
+    normalizedPublicHost.length > 0 &&
+    Number.isInteger(parsedPublicPort) &&
+    parsedPublicPort >= 1 &&
+    parsedPublicPort <= 65535 &&
+    (normalizedPublicHost !== runtimeContext.gateway.publicHost ||
+      parsedPublicPort !== runtimeContext.gateway.publicPort);
+
   const canSaveControlAuthHeader =
     runtimeContext !== null &&
     busyAction === null &&
     (controlAuthHeaderDraft !== runtimeContext.desktop.controlAuthHeaderName ||
       controlAuthTokenDraft !== (runtimeContext.desktop.controlAuthToken ?? ""));
 
-  const lanRisk =
-    runtimeContext?.gateway.enableLan && !runtimeContext.gateway.authRequired
-      ? "LAN exposure is enabled without bearer auth. Treat this as unsafe outside a trusted network."
-      : runtimeContext?.gateway.enableLan
-        ? "LAN exposure is enabled. Keep the bearer token private and review your allowlist before sharing access."
-        : "Gateway access remains loopback-only by default.";
+  const exposureRisk =
+    runtimeContext === null
+      ? "Loading gateway exposure settings."
+      : publicListenerIsLoopback
+        ? runtimeContext.gateway.enableLan
+          ? "LAN mode is enabled in config, but the public listener is still loopback-only."
+          : "Public listener is loopback-only. The gateway is not exposed beyond this machine."
+        : runtimeContext.gateway.authRequired
+          ? "Public listener is exposed beyond loopback. Keep the bearer token private and review your allowlist before sharing access."
+          : "Public listener is exposed beyond loopback without bearer auth. Treat this as unsafe outside a trusted network.";
 
   return (
     <section className="screen-stack">
@@ -227,18 +314,24 @@ export function SettingsScreen({
 
       <article
         className={
-          runtimeContext?.gateway.enableLan
+          runtimeContext !== null && publicListenerExposed && !runtimeContext.gateway.authRequired
             ? "wide-card feedback-card feedback-card-error"
-            : "wide-card"
+            : runtimeContext !== null && publicListenerExposed
+              ? "wide-card feedback-card"
+              : "wide-card"
         }
       >
         <span className="section-label">Security posture</span>
-        <h3>LAN and bearer auth</h3>
-        <p>{lanRisk}</p>
+        <h3>Network exposure and bearer auth</h3>
+        <p>{exposureRisk}</p>
         <dl className="settings-grid">
           <div>
             <dt>LAN enabled</dt>
             <dd>{runtimeContext?.gateway.enableLan ? "Yes" : "No"}</dd>
+          </div>
+          <div>
+            <dt>Public listener</dt>
+            <dd>{publicListenerIsLoopback ? "Loopback-only" : "LAN-exposed"}</dd>
           </div>
           <div>
             <dt>Auth required</dt>
@@ -253,6 +346,62 @@ export function SettingsScreen({
             <dd>{runtimeContext?.gateway.corsAllowlist.join(", ") ?? "Loading"}</dd>
           </div>
         </dl>
+      </article>
+
+      <article className="wide-card">
+        <span className="section-label">Public listener</span>
+        <h3>Listening address and port</h3>
+        <p>
+          Configure where the OpenAI-compatible public API binds. Use `127.0.0.1` for local-only
+          access or a LAN IP, or `0.0.0.0` to bind all interfaces. Restart is required after saving.
+        </p>
+        <div className="settings-grid">
+          <label className="field-stack">
+            <span className="section-label">Listening address</span>
+            <input
+              className="text-input"
+              onChange={(event) => setPublicHostDraft(event.target.value)}
+              placeholder="127.0.0.1"
+              type="text"
+              value={publicHostDraft}
+            />
+          </label>
+          <label className="field-stack">
+            <span className="section-label">Listening port</span>
+            <input
+              className="text-input"
+              min={1}
+              max={65535}
+              onChange={(event) => setPublicPortDraft(event.target.value)}
+              placeholder="1337"
+              step={1}
+              type="number"
+              value={publicPortDraft}
+            />
+          </label>
+        </div>
+        {listenerFeedback ? (
+          <div
+            className={
+              listenerFeedback.tone === "success"
+                ? "detail-alert detail-alert-success"
+                : "detail-alert"
+            }
+          >
+            <strong>{listenerFeedback.tone === "success" ? "Saved" : "Unable to save"}</strong>
+            <p>{listenerFeedback.text}</p>
+          </div>
+        ) : null}
+        <div className="button-row">
+          <button
+            className="primary-button"
+            disabled={!canSaveGatewayListenerSettings}
+            onClick={() => void saveGatewayListenerSettings()}
+            type="button"
+          >
+            {busyAction === "listener-settings" ? "Saving..." : "Save and restart"}
+          </button>
+        </div>
       </article>
 
       <article className="wide-card">

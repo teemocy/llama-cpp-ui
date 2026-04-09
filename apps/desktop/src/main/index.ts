@@ -37,6 +37,7 @@ export type DesktopRuntimeContext = {
     enableLan: boolean;
     authRequired: boolean;
     publicHost: string;
+    publicPort: number;
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
@@ -158,6 +159,7 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
     enableLan: sharedGatewayConfig.value.enableLan,
     authRequired: sharedGatewayConfig.value.authRequired,
     publicHost: gatewayConfig.publicHost,
+    publicPort: gatewayConfig.publicPort,
     controlHost: gatewayConfig.controlHost,
     corsAllowlist: [...gatewayConfig.corsAllowlist],
     defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
@@ -318,6 +320,40 @@ const registerIpcHandlers = (): void => {
 
     return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
   });
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewayListenerSettings,
+    async (
+      _event,
+      payload: {
+        publicHost: string;
+        publicPort: number;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      const publicHost = payload.publicHost.trim();
+      if (!publicHost) {
+        throw new Error("Listening address cannot be empty.");
+      }
+
+      if (
+        !Number.isInteger(payload.publicPort) ||
+        payload.publicPort < 1 ||
+        payload.publicPort > 65535
+      ) {
+        throw new Error("Listening port must be between 1 and 65535.");
+      }
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        publicHost,
+        publicPort: payload.publicPort,
+      });
+      reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
   ipcMain.handle(
     IPC_CHANNELS.systemUpdateModelsDirectory,
     async (_event, rawModelsDir: string): Promise<DesktopRuntimeContext> => {

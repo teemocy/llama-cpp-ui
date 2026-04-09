@@ -36,6 +36,7 @@ For a full setup, deployment, and user walkthrough, see [docs/design-deployment-
 - `LOCAL_LLM_HUB_APP_SUPPORT_DIR`: override the root app-support directory for both desktop and gateway.
 - `LOCAL_LLM_HUB_GATEWAY_CONFIG_FILE`: override the gateway JSON config file path.
 - `LOCAL_LLM_HUB_DESKTOP_CONFIG_FILE`: override the desktop JSON config file path.
+- `LOCAL_LLM_HUB_GATEWAY_PUBLIC_HOST`: override the public listener host.
 - `LOCAL_LLM_HUB_GATEWAY_PUBLIC_PORT`: override the public listener port.
 - `LOCAL_LLM_HUB_GATEWAY_CONTROL_PORT`: override the control listener port.
 

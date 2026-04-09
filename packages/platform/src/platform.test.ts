@@ -109,6 +109,27 @@ describe("platform helpers", () => {
     expect(config.sources).toContain("env");
   });
 
+  it("loads gateway config with persisted listener settings", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-gateway-listener-"));
+    tempDirectories.push(root);
+    const filePath = path.join(root, "config", "gateway.json");
+
+    writeConfigFile(filePath, {
+      publicHost: "0.0.0.0",
+      publicPort: 8080,
+    });
+
+    const config = loadGatewayConfig({
+      cwd: root,
+      environment: "development",
+      filePath,
+    });
+
+    expect(config.value.publicHost).toBe("0.0.0.0");
+    expect(config.value.publicPort).toBe(8080);
+    expect(config.sources).toContain("file");
+  });
+
   it("loads desktop config with a persisted control auth header preference", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "lm-hub-desktop-config-"));
     tempDirectories.push(root);

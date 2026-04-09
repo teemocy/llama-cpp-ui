@@ -43,6 +43,7 @@ type DesktopRuntimeContext = {
     enableLan: boolean;
     authRequired: boolean;
     publicHost: string;
+    publicPort: number;
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
@@ -335,6 +336,17 @@ export function App() {
     requestRefresh();
   };
 
+  const updateGatewayListenerSettings = async (payload: {
+    publicHost: string;
+    publicPort: number;
+  }): Promise<void> => {
+    const updatedContext = await window.desktopApi.system.updateGatewayListenerSettings(payload);
+    startTransition(() => {
+      setRuntimeContext(updatedContext);
+    });
+    requestRefresh();
+  };
+
   const updateControlAuthSettings = async (payload: {
     headerName: ControlAuthHeaderName;
     token: string;
@@ -518,6 +530,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
+                  onUpdateGatewayListenerSettings={updateGatewayListenerSettings}
                   onUpdateControlAuthSettings={updateControlAuthSettings}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}

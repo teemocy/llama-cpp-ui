@@ -47,6 +47,7 @@ type DesktopRuntimeContext = {
     enableLan: boolean;
     authRequired: boolean;
     publicHost: string;
+    publicPort: number;
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
@@ -118,6 +119,10 @@ type DesktopApi = {
     copyPath(filePath: string): Promise<void>;
     revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
+    updateGatewayListenerSettings(payload: {
+      publicHost: string;
+      publicPort: number;
+    }): Promise<DesktopRuntimeContext>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
     updateControlAuthSettings(payload: {
       headerName: ControlAuthHeaderName;
