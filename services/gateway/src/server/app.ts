@@ -10,8 +10,8 @@ import {
   chatCompletionsRequestSchema,
   desktopChatRunRequestSchema,
   desktopChatSessionUpsertRequestSchema,
-  desktopEngineInstallRequestSchema,
   desktopDownloadCreateRequestSchema,
+  desktopEngineInstallRequestSchema,
   desktopLocalModelImportRequestSchema,
   desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
@@ -285,7 +285,11 @@ async function registerPublicApp(
         reply.raw.setHeader("cache-control", "no-cache, no-transform");
         reply.raw.setHeader("connection", "keep-alive");
         reply.raw.setHeader("x-request-id", request.id);
-        pipeStreamingResponse(request, reply, result.stream as globalThis.ReadableStream<Uint8Array>);
+        pipeStreamingResponse(
+          request,
+          reply,
+          result.stream as globalThis.ReadableStream<Uint8Array>,
+        );
         return reply;
       }
 
@@ -770,6 +774,7 @@ export async function startGateway(
     cwd: process.cwd(),
     defaultModelTtlMs: config.defaultModelTtlMs,
     localModelsDir: config.localModelsDir,
+    maxActiveModelsInMemory: config.maxActiveModelsInMemory,
     telemetryIntervalMs: config.telemetryIntervalMs,
   }),
 ): Promise<StartedGateway> {

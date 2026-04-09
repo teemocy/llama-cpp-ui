@@ -51,9 +51,10 @@ type DesktopRuntimeContext = {
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
+    maxActiveModelsInMemory: number;
     localModelsDir: string;
+    publicAuthToken?: string;
     controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
   };
   files: {
     desktopConfigFile: string;
@@ -119,9 +120,18 @@ type DesktopApi = {
     copyPath(filePath: string): Promise<void>;
     revealPath(filePath: string): Promise<boolean>;
     pickModelsDirectory(): Promise<FileDialogResult>;
+    updateGatewaySettings(payload: {
+      publicHost: string;
+      publicPort: number;
+      maxActiveModelsInMemory: number;
+      apiAuthToken?: string;
+    }): Promise<DesktopRuntimeContext>;
     updateGatewayListenerSettings(payload: {
       publicHost: string;
       publicPort: number;
+    }): Promise<DesktopRuntimeContext>;
+    updateGatewayRuntimeSettings(payload: {
+      maxActiveModelsInMemory: number;
     }): Promise<DesktopRuntimeContext>;
     updateModelsDirectory(modelsDir: string): Promise<DesktopRuntimeContext>;
     updateControlAuthSettings(payload: {

@@ -122,6 +122,7 @@ const DEFAULT_STREAM_HEARTBEAT_MS = 15_000;
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 1_500;
 const DEFAULT_WORKER_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_RESIDENT_MEMORY_BYTES = 0;
+const DEFAULT_MAX_ACTIVE_MODELS_IN_MEMORY = 0;
 const DEFAULT_MAX_WORKERS_PER_MODEL = 2;
 const DEFAULT_FAILURE_BACKOFF_MS = 250;
 const DEFAULT_FAILURE_BACKOFF_MAX_MS = 2_000;
@@ -199,11 +200,7 @@ function extractTrailingQuantization(stem: string): string | undefined {
   return normalizeQuantLabel(match?.[1]);
 }
 
-function getOptionalNumber(
-  value: unknown,
-  min?: number,
-  max?: number,
-): number | undefined {
+function getOptionalNumber(value: unknown, min?: number, max?: number): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
@@ -450,6 +447,7 @@ interface RepositoryGatewayRuntimeOptions {
   shutdownDrainTimeoutMs?: number;
   workerStopTimeoutMs?: number;
   maxResidentMemoryBytes?: number;
+  maxActiveModelsInMemory?: number;
   maxWorkersPerModel?: number;
   failureBackoffMs?: number;
   failureBackoffMaxMs?: number;
@@ -1286,6 +1284,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #shutdownDrainTimeoutMs: number;
   readonly #workerStopTimeoutMs: number;
   readonly #maxResidentMemoryBytes: number;
+  readonly #maxActiveModelsInMemory: number;
   readonly #maxWorkersPerModel: number;
   readonly #failureBackoffMs: number;
   readonly #failureBackoffMaxMs: number;
@@ -1330,6 +1329,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#workerStopTimeoutMs = options.workerStopTimeoutMs ?? DEFAULT_WORKER_STOP_TIMEOUT_MS;
     this.#maxResidentMemoryBytes =
       options.maxResidentMemoryBytes ?? DEFAULT_MAX_RESIDENT_MEMORY_BYTES;
+    this.#maxActiveModelsInMemory =
+      options.maxActiveModelsInMemory ?? DEFAULT_MAX_ACTIVE_MODELS_IN_MEMORY;
     this.#maxWorkersPerModel = options.maxWorkersPerModel ?? DEFAULT_MAX_WORKERS_PER_MODEL;
     this.#failureBackoffMs = options.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS;
     this.#failureBackoffMaxMs = options.failureBackoffMaxMs ?? DEFAULT_FAILURE_BACKOFF_MAX_MS;
@@ -1626,7 +1627,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: false,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
         messages: buildChatCompletionMessages(
@@ -1707,7 +1710,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       {
         model: input.model,
         stream: true,
-        ...(chatSettings.temperature !== undefined ? { temperature: chatSettings.temperature } : {}),
+        ...(chatSettings.temperature !== undefined
+          ? { temperature: chatSettings.temperature }
+          : {}),
         ...(chatSettings.topP !== undefined ? { top_p: chatSettings.topP } : {}),
         ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
         messages: buildChatCompletionMessages(
@@ -2488,6 +2493,28 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     return Array.from(this.#workers.values()).flat();
   }
 
+  private getActiveRuntimeKeys(): Set<string> {
+    const runtimeKeys = new Set<string>();
+
+    for (const [runtimeKeyString, workers] of this.#workers.entries()) {
+      if (workers.length > 0) {
+        runtimeKeys.add(runtimeKeyString);
+      }
+    }
+
+    for (const [runtimeKeyString, reservationCount] of this.#pendingLoadReservations.entries()) {
+      if (reservationCount > 0) {
+        runtimeKeys.add(runtimeKeyString);
+      }
+    }
+
+    return runtimeKeys;
+  }
+
+  private getActiveRuntimeKeyCount(): number {
+    return this.getActiveRuntimeKeys().size;
+  }
+
   private getPendingLoadPromises(runtimeKeyString: string): Promise<ManagedWorker>[] {
     return Array.from(this.#loadPromises.get(runtimeKeyString) ?? []);
   }
@@ -3162,6 +3189,65 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
   }
 
+  private async enforceMaxActiveModelsInMemory(
+    resolved: ResolvedModelRecord,
+    traceId: string,
+  ): Promise<void> {
+    if (this.#maxActiveModelsInMemory <= 0) {
+      return;
+    }
+
+    let activeRuntimeKeyCount = this.getActiveRuntimeKeyCount();
+    if (activeRuntimeKeyCount <= this.#maxActiveModelsInMemory) {
+      return;
+    }
+
+    const evictionCandidates = Array.from(this.#workers.entries())
+      .filter(
+        ([runtimeKeyString, workers]) =>
+          runtimeKeyString !== resolved.runtimeKeyString &&
+          workers.length > 0 &&
+          workers.every((worker) => worker.inflightRequests === 0 && worker.state === "Ready"),
+      )
+      .map(([, workers]) => ({
+        lastUsedAt: Math.max(...workers.map((worker) => worker.lastUsedAt)),
+        workers: [...workers],
+      }))
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+
+    for (const candidate of evictionCandidates) {
+      if (activeRuntimeKeyCount <= this.#maxActiveModelsInMemory) {
+        break;
+      }
+
+      this.publishLog(
+        "info",
+        `Evicting ${candidate.workers[0]?.artifact.id ?? "worker"} to keep at most ${this.#maxActiveModelsInMemory} active model${this.#maxActiveModelsInMemory === 1 ? "" : "s"} in memory while loading ${resolved.artifact.id}.`,
+        traceId,
+        candidate.workers[0]?.artifact.id,
+        "gateway",
+      );
+      await Promise.allSettled(
+        candidate.workers.map((worker) =>
+          this.stopWorker(
+            worker,
+            traceId,
+            `Evicted to respect the max active model limit while loading ${resolved.artifact.id}.`,
+          ),
+        ),
+      );
+      activeRuntimeKeyCount = this.getActiveRuntimeKeyCount();
+    }
+
+    if (activeRuntimeKeyCount > this.#maxActiveModelsInMemory) {
+      throw new GatewayRequestError(
+        "resource_exhausted",
+        `Max active models in memory (${this.#maxActiveModelsInMemory}) reached while loading ${resolved.artifact.id}.`,
+        503,
+      );
+    }
+  }
+
   private async loadWorker(resolved: ResolvedModelRecord, traceId: string): Promise<ManagedWorker> {
     this.assertWorkerLoadAllowed(resolved, traceId);
     const pendingLoads = this.#loadPromises.get(resolved.runtimeKeyString) ?? new Set();
@@ -3210,6 +3296,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           throw new Error(getMissingArtifactMessage(resolved.artifact));
         }
 
+        await this.enforceMaxActiveModelsInMemory(resolved, traceId);
         await this.enforceResidentMemoryBudget(resolved, traceId);
 
         const harness = await createLlamaCppHarness(this.#adapter, {

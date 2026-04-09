@@ -250,6 +250,7 @@ interface CreateStage2FixtureOptions {
 function createTestConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
     defaultModelTtlMs: 1_000,
+    maxActiveModelsInMemory: 0,
     publicHost: "127.0.0.1",
     publicPort: 11434,
     controlHost: "127.0.0.1",
@@ -783,6 +784,33 @@ describe("gateway stage 2 runtime", () => {
     );
   });
 
+  it("evicts the least recently used idle model when the active model limit is reached", async () => {
+    const fixture = await createStage2Fixture({
+      extraSeedModels: [
+        {
+          artifact: secondaryChatModelArtifact,
+          profile: secondaryChatModelProfile,
+          fileName: "fixture-qwen25-chat-secondary.gguf",
+        },
+      ],
+      runtimeOverrides: {
+        maxActiveModelsInMemory: 1,
+      },
+    });
+
+    await fixture.runtime.preloadModel(fixtureModelArtifact.id, "trace-model-cap-1");
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+    await fixture.runtime.preloadModel(secondaryChatModelArtifact.id, "trace-model-cap-2");
+
+    const runtimeModels = fixture.runtime.listRuntimeModels();
+    expect(runtimeModels.find((model) => model.id === fixtureModelArtifact.id)?.loaded).toBe(false);
+    expect(runtimeModels.find((model) => model.id === secondaryChatModelArtifact.id)?.loaded).toBe(
+      true,
+    );
+  });
+
   it("rejects new work once shutdown draining begins", async () => {
     const fixture = await createStage2Fixture({
       runtimeOverrides: {
@@ -1139,7 +1167,8 @@ describe("gateway stage 2 runtime", () => {
     const log = chat
       .listRecentApiLogs()
       .find(
-        (entry) => entry.endpoint === "/v1/chat/completions" && entry.modelId === fixtureModelArtifact.id,
+        (entry) =>
+          entry.endpoint === "/v1/chat/completions" && entry.modelId === fixtureModelArtifact.id,
       );
     reopened.database.close();
 

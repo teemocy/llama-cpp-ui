@@ -152,6 +152,29 @@ const api = {
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayOpenModelsDirectoryDialog,
       ) as Promise<FileDialogResult>,
+    updateGatewaySettings: (payload: {
+      publicHost: string;
+      publicPort: number;
+      maxActiveModelsInMemory: number;
+      apiAuthToken?: string;
+    }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewaySettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
+    updateGatewayListenerSettings: (payload: {
+      publicHost: string;
+      publicPort: number;
+    }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewayListenerSettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
+    updateGatewayRuntimeSettings: (payload: { maxActiveModelsInMemory: number }) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.systemUpdateGatewayRuntimeSettings,
+        payload,
+      ) as Promise<DesktopRuntimeContext>,
     updateModelsDirectory: (modelsDir: string) =>
       ipcRenderer.invoke(
         IPC_CHANNELS.systemUpdateModelsDirectory,

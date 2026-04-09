@@ -47,9 +47,10 @@ type DesktopRuntimeContext = {
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
+    maxActiveModelsInMemory: number;
     localModelsDir: string;
+    publicAuthToken?: string;
     controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
   };
   files: {
     desktopConfigFile: string;
@@ -336,25 +337,13 @@ export function App() {
     requestRefresh();
   };
 
-  const updateGatewayListenerSettings = async (payload: {
+  const updateGatewaySettings = async (payload: {
     publicHost: string;
     publicPort: number;
+    maxActiveModelsInMemory: number;
+    apiAuthToken: string;
   }): Promise<void> => {
-    const updatedContext = await window.desktopApi.system.updateGatewayListenerSettings(payload);
-    startTransition(() => {
-      setRuntimeContext(updatedContext);
-    });
-    requestRefresh();
-  };
-
-  const updateControlAuthSettings = async (payload: {
-    headerName: ControlAuthHeaderName;
-    token: string;
-  }): Promise<void> => {
-    const updatedContext = await window.desktopApi.system.updateControlAuthSettings({
-      headerName: payload.headerName,
-      token: payload.token,
-    });
+    const updatedContext = await window.desktopApi.system.updateGatewaySettings(payload);
     startTransition(() => {
       setRuntimeContext(updatedContext);
     });
@@ -530,8 +519,7 @@ export function App() {
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
-                  onUpdateGatewayListenerSettings={updateGatewayListenerSettings}
-                  onUpdateControlAuthSettings={updateControlAuthSettings}
+                  onUpdateGatewaySettings={updateGatewaySettings}
                   onUpdateModelsDirectory={updateModelsDirectory}
                   paths={paths}
                   runtimeContext={runtimeContext}

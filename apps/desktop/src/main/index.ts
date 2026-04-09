@@ -41,9 +41,10 @@ export type DesktopRuntimeContext = {
     controlHost: string;
     corsAllowlist: string[];
     defaultModelTtlMs: number;
+    maxActiveModelsInMemory: number;
     localModelsDir: string;
+    publicAuthToken?: string;
     controlAuthHeaderName: ControlAuthHeaderName;
-    authConfigured: boolean;
   };
   files: {
     desktopConfigFile: string;
@@ -157,15 +158,18 @@ const buildRuntimeContext = (): DesktopRuntimeContext => ({
   },
   gateway: {
     enableLan: sharedGatewayConfig.value.enableLan,
-    authRequired: sharedGatewayConfig.value.authRequired,
+    authRequired: Boolean(gatewayConfig.publicBearerToken),
     publicHost: gatewayConfig.publicHost,
     publicPort: gatewayConfig.publicPort,
     controlHost: gatewayConfig.controlHost,
     corsAllowlist: [...gatewayConfig.corsAllowlist],
     defaultModelTtlMs: gatewayConfig.defaultModelTtlMs,
+    maxActiveModelsInMemory: gatewayConfig.maxActiveModelsInMemory,
     localModelsDir: gatewayConfig.localModelsDir,
+    ...(sharedGatewayConfig.value.publicAuthToken !== undefined
+      ? { publicAuthToken: sharedGatewayConfig.value.publicAuthToken }
+      : {}),
     controlAuthHeaderName: desktopConfig.value.controlAuthHeaderName,
-    authConfigured: Boolean(gatewayConfig.controlBearerToken || gatewayConfig.publicBearerToken),
   },
   files: {
     desktopConfigFile: appPaths.desktopConfigFile,
@@ -321,6 +325,63 @@ const registerIpcHandlers = (): void => {
     return mainWindow ? dialog.showOpenDialog(mainWindow, options) : dialog.showOpenDialog(options);
   });
   ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewaySettings,
+    async (
+      _event,
+      payload: {
+        publicHost: string;
+        publicPort: number;
+        maxActiveModelsInMemory: number;
+        apiAuthToken?: string;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      const publicHost = payload.publicHost.trim();
+      if (!publicHost) {
+        throw new Error("Listening address cannot be empty.");
+      }
+
+      if (
+        !Number.isInteger(payload.publicPort) ||
+        payload.publicPort < 1 ||
+        payload.publicPort > 65535
+      ) {
+        throw new Error("Listening port must be between 1 and 65535.");
+      }
+
+      if (
+        !Number.isInteger(payload.maxActiveModelsInMemory) ||
+        payload.maxActiveModelsInMemory < 0
+      ) {
+        throw new Error("Max active models in memory must be 0 or a positive whole number.");
+      }
+
+      const apiAuthToken = payload.apiAuthToken?.trim();
+      const normalizedApiAuthToken =
+        apiAuthToken && apiAuthToken.length > 0 ? apiAuthToken : undefined;
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        publicHost,
+        publicPort: payload.publicPort,
+        maxActiveModelsInMemory: payload.maxActiveModelsInMemory,
+        authRequired: Boolean(normalizedApiAuthToken),
+        publicAuthToken: normalizedApiAuthToken,
+      });
+      mkdirSync(path.dirname(desktopConfig.filePath), { recursive: true });
+      writeConfigFile(desktopConfig.filePath, {
+        ...desktopConfig.value,
+        controlAuthHeaderName: "api-key",
+        controlAuthToken: normalizedApiAuthToken,
+      });
+      reloadGatewayConfig();
+      reloadDesktopConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
+  ipcMain.handle(
     IPC_CHANNELS.systemUpdateGatewayListenerSettings,
     async (
       _event,
@@ -347,6 +408,32 @@ const registerIpcHandlers = (): void => {
         ...sharedGatewayConfig.value,
         publicHost,
         publicPort: payload.publicPort,
+      });
+      reloadGatewayConfig();
+      await gatewayManager.restart();
+
+      return buildRuntimeContext();
+    },
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.systemUpdateGatewayRuntimeSettings,
+    async (
+      _event,
+      payload: {
+        maxActiveModelsInMemory: number;
+      },
+    ): Promise<DesktopRuntimeContext> => {
+      if (
+        !Number.isInteger(payload.maxActiveModelsInMemory) ||
+        payload.maxActiveModelsInMemory < 0
+      ) {
+        throw new Error("Max active models in memory must be 0 or a positive whole number.");
+      }
+
+      mkdirSync(path.dirname(sharedGatewayConfig.filePath), { recursive: true });
+      writeConfigFile(sharedGatewayConfig.filePath, {
+        ...sharedGatewayConfig.value,
+        maxActiveModelsInMemory: payload.maxActiveModelsInMemory,
       });
       reloadGatewayConfig();
       await gatewayManager.restart();
