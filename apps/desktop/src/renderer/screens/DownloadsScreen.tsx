@@ -56,6 +56,14 @@ const formatCount = (value: number | undefined): string =>
 const formatUpdatedAt = (value: string | undefined): string =>
   value ? new Date(value).toLocaleDateString() : "Unknown";
 
+const getVariantDownloadLabel = (isMlx: boolean, fileCount: number): string => {
+  if (isMlx) {
+    return fileCount > 1 ? "Download MLX bundle" : "Download MLX file";
+  }
+
+  return fileCount > 1 ? "Download GGUF files" : "Download GGUF";
+};
+
 export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
   const [query, setQuery] = useState("qwen");
   const [results, setResults] = useState<DesktopProviderSearchItem[]>([]);
@@ -281,6 +289,7 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                 selectedVariant?.files.some(
                   (file) => (file.metadata?.engineType as string | undefined) === "mlx",
                 ) ?? false;
+              const selectedVariantLabel = selectedVariantIsMlx ? "MLX bundle" : "GGUF";
 
               return (
                 <article className="search-result-item" key={item.id}>
@@ -295,6 +304,24 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                       </div>
                       <span className="status-pill status-pill-neutral">{item.provider}</span>
                     </div>
+                    {selectedVariant ? (
+                      <div className="pill-row search-result-pill-row">
+                        <span
+                          className={
+                            selectedVariantIsMlx
+                              ? "meta-pill meta-pill-mlx"
+                              : "meta-pill meta-pill-muted"
+                          }
+                        >
+                          {selectedVariantLabel}
+                        </span>
+                        {selectedVariantIsMlx ? (
+                          <span className="meta-pill meta-pill-muted">
+                            Use this to run the MLX backend
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                     <p>{item.summary ?? item.description ?? "Provider repository result."}</p>
 
                     {detailState.warnings.length > 0 ? (
@@ -389,8 +416,11 @@ export function DownloadsScreen({ shellState }: DownloadsScreenProps) {
                           onClick={() => void createDownload(detail)}
                           type="button"
                         >
-                          {selectedVariant && selectedVariant.files.length > 1
-                            ? "Download all files"
+                          {selectedVariant
+                            ? getVariantDownloadLabel(
+                                selectedVariantIsMlx,
+                                selectedVariant.files.length,
+                              )
                             : "Download"}
                         </button>
                       ) : (
