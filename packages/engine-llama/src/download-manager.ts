@@ -84,8 +84,10 @@ export interface LocalModelRegistrar {
 
 export interface LlamaCppDownloadManagerOptions {
   supportRoot: string;
+  localModelsDir?: string;
   downloadsRepository: DownloadTasksRepository;
-  modelRegistrars: Record<string, LocalModelRegistrar>;
+  modelRegistrars?: Record<string, LocalModelRegistrar>;
+  modelManager?: LocalModelRegistrar;
   providerSearch: ProviderSearchService;
   emitEvent?: (event: GatewayEvent) => void;
   fetch?: typeof fetch;
@@ -119,12 +121,37 @@ function ensureDirectory(directory: string): string {
   return directory;
 }
 
+function isMlxSafetensorShard(fileName: string): boolean {
+  return /\.safetensors(?:\.index\.json)?$/i.test(fileName);
+}
+
+function isMlxTokenizerCoreAsset(fileName: string): boolean {
+  return /^tokenizer(?:\.|$)/i.test(fileName) || /\.tiktoken$/i.test(fileName);
+}
+
+function hasCompletedMlxTokenizerAssets(tasks: readonly DownloadTask[]): boolean {
+  const completedNames = tasks
+    .filter((task) => task.status === "completed")
+    .map((task) => toTaskMetadata(task).fileName);
+
+  return (
+    completedNames.some((fileName) => isMlxTokenizerCoreAsset(fileName)) ||
+    (completedNames.some((fileName) => /^vocab\.json$/i.test(fileName)) &&
+      completedNames.some((fileName) => /^merges\.txt$/i.test(fileName)))
+  );
+}
+
+function hasCompletedMlxWeightShards(tasks: readonly DownloadTask[]): boolean {
+  const shardTasks = tasks.filter((task) => isMlxSafetensorShard(toTaskMetadata(task).fileName));
+  return shardTasks.length > 0 && shardTasks.every((task) => task.status === "completed");
+}
+
 function buildDestinationPath(
-  supportRoot: string,
+  localModelsDir: string,
   providerModelId: string,
   fileName: string,
 ): string {
-  const modelDirectory = path.join(supportRoot, "models", sanitizePathPart(providerModelId));
+  const modelDirectory = path.join(localModelsDir, sanitizePathPart(providerModelId));
   const segments = sanitizeRelativeSegments(fileName);
   return path.join(modelDirectory, ...(segments.length > 0 ? segments : ["artifact.bin"]));
 }
@@ -206,6 +233,7 @@ export class LlamaCppDownloadManager {
   readonly #traceIdFactory: () => string;
   readonly #chunkBytes: number;
   readonly #downloadsRoot: string;
+  readonly #localModelsDir: string;
   readonly #partialsRoot: string;
   readonly #activeControllers = new Map<string, AbortController>();
   readonly #activeRuns = new Map<string, Promise<Stage3DownloadRecord>>();
@@ -213,16 +241,22 @@ export class LlamaCppDownloadManager {
   constructor(options: LlamaCppDownloadManagerOptions) {
     this.#supportRoot = options.supportRoot;
     this.#downloadsRepository = options.downloadsRepository;
-    this.#modelRegistrars = new Map(Object.entries(options.modelRegistrars));
+    const modelRegistrars =
+      options.modelRegistrars ?? (options.modelManager ? { "llama.cpp": options.modelManager } : undefined);
+    if (!modelRegistrars) {
+      throw new Error("At least one local model registrar must be configured.");
+    }
+    this.#modelRegistrars = new Map(Object.entries(modelRegistrars));
     this.#providerSearch = options.providerSearch;
     this.#emitEvent = options.emitEvent;
     this.#fetch = options.fetch ?? fetch;
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#traceIdFactory = options.traceIdFactory ?? randomUUID;
     this.#chunkBytes = options.chunkBytes ?? DEFAULT_CHUNK_BYTES;
+    this.#localModelsDir = options.localModelsDir ?? path.join(this.#supportRoot, "models");
     this.#downloadsRoot = ensureDirectory(path.join(this.#supportRoot, "downloads"));
     this.#partialsRoot = ensureDirectory(path.join(this.#downloadsRoot, "partials"));
-    ensureDirectory(path.join(this.#supportRoot, "models"));
+    ensureDirectory(this.#localModelsDir);
   }
 
   async search(
@@ -251,16 +285,12 @@ export class LlamaCppDownloadManager {
       provider: request.provider,
       providerModelId: request.providerModelId,
       artifactId: request.artifactId,
-      destinationPath: path.join(
-        this.#supportRoot,
-        "models",
-        sanitizePathPart(request.providerModelId),
-      ),
+      destinationPath: path.join(this.#localModelsDir, sanitizePathPart(request.providerModelId)),
     } satisfies ProviderDownloadRequest);
     const fileName = path.basename(plan.fileName);
     const partialPath = path.join(this.#partialsRoot, `${taskId}.part`);
     const destinationPath = buildDestinationPath(
-      this.#supportRoot,
+      this.#localModelsDir,
       request.providerModelId,
       plan.fileName,
     );
@@ -596,8 +626,7 @@ export class LlamaCppDownloadManager {
         : path.isAbsolute(metadata.registrationPath)
           ? metadata.registrationPath
           : path.join(
-              this.#supportRoot,
-              "models",
+              this.#localModelsDir,
               sanitizePathPart(metadata.providerModelId),
               metadata.registrationPath,
             );
@@ -626,7 +655,24 @@ export class LlamaCppDownloadManager {
       const metadata = toTaskMetadata(task);
       return metadata.bundleId === bundleId;
     });
-    if (bundleTasks.length === 0 || bundleTasks.some((task) => task.status !== "completed")) {
+    if (bundleTasks.length === 0) {
+      return undefined;
+    }
+
+    const engineType = bundleTasks
+      .map((task) => toTaskMetadata(task).engineType)
+      .find((value): value is string => typeof value === "string" && value.length > 0);
+    const completedTasks = bundleTasks.filter((task) => task.status === "completed");
+
+    if (engineType === "mlx") {
+      if (
+        !hasCompletedMlxWeightShards(bundleTasks) ||
+        !hasCompletedMlxTokenizerAssets(bundleTasks) ||
+        completedTasks.length === 0
+      ) {
+        return undefined;
+      }
+    } else if (bundleTasks.some((task) => task.status !== "completed")) {
       return undefined;
     }
 
@@ -634,12 +680,14 @@ export class LlamaCppDownloadManager {
       .map((task) => toTaskMetadata(task).bundlePrimaryArtifactId)
       .find((value): value is string => typeof value === "string" && value.length > 0);
     const primaryTask =
-      bundleTasks.find((task) => {
+      completedTasks.find((task) => {
         const metadata = toTaskMetadata(task);
         return primaryArtifactId
           ? metadata.artifactId === primaryArtifactId
           : metadata.autoRegister;
-      }) ?? bundleTasks[0];
+      }) ??
+      completedTasks.find((task) => toTaskMetadata(task).autoRegister) ??
+      completedTasks[0];
     if (!primaryTask) {
       return undefined;
     }

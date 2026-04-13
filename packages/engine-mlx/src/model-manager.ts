@@ -115,6 +115,30 @@ function isTokenizerAsset(fileName: string): boolean {
   );
 }
 
+function isTokenizerCoreAsset(fileName: string): boolean {
+  return /^tokenizer(?:\.|$)/i.test(fileName) || /\.tiktoken$/i.test(fileName);
+}
+
+function hasRequiredTokenizerAssets(fileNames: Iterable<string>): boolean {
+  let hasTokenizerCoreAsset = false;
+  let hasVocabJson = false;
+  let hasMergesTxt = false;
+
+  for (const fileName of fileNames) {
+    if (isTokenizerCoreAsset(fileName)) {
+      hasTokenizerCoreAsset = true;
+    }
+    if (/^vocab\.json$/i.test(fileName)) {
+      hasVocabJson = true;
+    }
+    if (/^merges\.txt$/i.test(fileName)) {
+      hasMergesTxt = true;
+    }
+  }
+
+  return hasTokenizerCoreAsset || (hasVocabJson && hasMergesTxt);
+}
+
 function isSafetensorShard(fileName: string): boolean {
   return /\.safetensors(?:\.index\.json)?$/i.test(fileName);
 }
@@ -128,13 +152,8 @@ function isLikelyMlxDirectory(directory: string): boolean {
   }
 
   const fileNames = new Set(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
-  if (!fileNames.has("config.json")) {
-    return false;
-  }
-
-  const hasTokenizer = [...fileNames].some((fileName) => isTokenizerAsset(fileName));
   const shardCount = [...fileNames].filter((fileName) => isSafetensorShard(fileName)).length;
-  return hasTokenizer && shardCount > 0;
+  return hasRequiredTokenizerAssets(fileNames) && shardCount > 0;
 }
 
 export function isMlxModelDirectoryPath(filePath: string): boolean {

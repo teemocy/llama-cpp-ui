@@ -674,6 +674,58 @@ describe("gateway stage 2 runtime", () => {
     },
   );
 
+  it.runIf(supportsMlxTests)(
+    "auto-discovers legacy managed MLX downloads when the configured models path differs",
+    async () => {
+      const supportRoot = await mkdtemp(path.join(os.tmpdir(), "localhub-gateway-stage2-legacy-"));
+      const configuredModelsDir = path.join(supportRoot, "external-models");
+      const legacyManagedModelsDir = path.join(supportRoot, "models");
+      const mlxPath = path.join(legacyManagedModelsDir, "gateway-stage2-legacy-mlx");
+
+      await writeSampleMlxModelDirectory(mlxPath);
+
+      const runtime = createRepositoryGatewayRuntime({
+        cwd: process.cwd(),
+        defaultModelTtlMs: 1_000,
+        env: {
+          ...process.env,
+          LOCAL_LLM_HUB_ENV: "test",
+        },
+        fakeWorkerStartupDelayMs: 25,
+        preferFakeWorker: true,
+        supportRoot,
+        localModelsDir: configuredModelsDir,
+        telemetryIntervalMs: 50,
+      });
+      fixtures.push({
+        appPaths: resolveAppPaths({
+          cwd: process.cwd(),
+          environment: "test",
+          supportRoot,
+        }),
+        artifactPaths: {},
+        async cleanup() {
+          await runtime.stop();
+          await rm(supportRoot, { recursive: true, force: true });
+        },
+        runtime,
+      });
+
+      await runtime.start();
+
+      const models = await runtime.listDesktopModels();
+      expect(models).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            localPath: mlxPath,
+            engineType: "mlx",
+            format: "mlx",
+          }),
+        ]),
+      );
+    },
+  );
+
   it("imports a local llama.cpp binary through the control route and packages it into support", async () => {
     const fixture = await createStage2Fixture();
     const gateway = await buildGateway({

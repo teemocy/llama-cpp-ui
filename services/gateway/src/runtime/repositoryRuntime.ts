@@ -716,6 +716,29 @@ function collectLocalModelCandidates(rootDir: string): LocalModelCandidate[] {
   );
 }
 
+function collectLocalModelCandidatesFromRoots(rootDirs: readonly string[]): LocalModelCandidate[] {
+  const deduped = new Map<string, LocalModelCandidate>();
+
+  for (const rootDir of rootDirs) {
+    for (const candidate of collectLocalModelCandidates(rootDir)) {
+      const normalizedPath = path.resolve(candidate.filePath);
+      const key = `${candidate.engineType}:${normalizedPath}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, {
+          engineType: candidate.engineType,
+          filePath: normalizedPath,
+        });
+      }
+    }
+  }
+
+  return [...deduped.values()].sort(
+    (left, right) =>
+      left.engineType.localeCompare(right.engineType) ||
+      left.filePath.localeCompare(right.filePath),
+  );
+}
+
 function normalizeCapabilityOverrides(
   overrides: ModelProfile["capabilityOverrides"],
 ): CapabilityOverrides {
@@ -1484,6 +1507,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   readonly #downloadsRepository: DownloadTasksRepository;
   readonly #downloadManager: LlamaCppDownloadManager;
   readonly #enginesRepository: EngineVersionsRepository;
+  readonly #legacyManagedModelsDir: string;
   readonly #localModelsDir: string;
   readonly #mlxSupported: boolean;
   readonly #modelManagers: Map<string, EngineBackedModelManager>;
@@ -1534,6 +1558,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     this.#database = database;
     this.#localModelsDir = options.localModelsDir;
     this.#supportRoot = appPaths.supportRoot;
+    this.#legacyManagedModelsDir = appPaths.modelsDir;
     this.#telemetryIntervalMs = options.telemetryIntervalMs;
     this.#defaultModelTtlMs = options.defaultModelTtlMs;
     this.#shutdownDrainTimeoutMs =
@@ -1602,6 +1627,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
     this.#downloadManager = new LlamaCppDownloadManager({
       supportRoot: this.#supportRoot,
+      localModelsDir: options.localModelsDir,
       downloadsRepository: this.#downloadsRepository,
       modelRegistrars: Object.fromEntries(this.#modelManagers.entries()),
       providerSearch: options.providerSearch ?? createDefaultProviderSearchService(),
@@ -1631,7 +1657,12 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     );
     const discoveredModels: unknown[] = [];
 
-    for (const candidate of collectLocalModelCandidates(this.#localModelsDir)) {
+    const scanRoots = [this.#localModelsDir];
+    if (path.resolve(this.#legacyManagedModelsDir) !== path.resolve(this.#localModelsDir)) {
+      scanRoots.push(this.#legacyManagedModelsDir);
+    }
+
+    for (const candidate of collectLocalModelCandidatesFromRoots(scanRoots)) {
       const normalizedPath = path.resolve(candidate.filePath);
       if (existingPaths.has(normalizedPath)) {
         continue;
