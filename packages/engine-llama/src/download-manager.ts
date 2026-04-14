@@ -531,8 +531,11 @@ export class LlamaCppDownloadManager {
     const tasks = this.resolveGroupTasks(id);
     await Promise.all(
       tasks
-        .filter((task) => task.status === "paused" || task.status === "pending")
-        .map((task) => this.resumeTask(task.id).catch(() => undefined)),
+        .filter(
+          (task) =>
+            task.status === "paused" || task.status === "pending" || task.status === "error",
+        )
+        .map((task) => this.resumeTask(task.id)),
     );
     return this.getGroupedRecordOrThrow(getTaskGroupId(tasks[0]!));
   }
@@ -591,7 +594,7 @@ export class LlamaCppDownloadManager {
     const running = this.#activeRuns.get(taskId);
     const currentTask = this.#downloadsRepository.findById(taskId);
 
-    if (running && currentTask?.status !== "paused") {
+    if (running && currentTask?.status !== "paused" && currentTask?.status !== "error") {
       return running;
     }
     if (running) {

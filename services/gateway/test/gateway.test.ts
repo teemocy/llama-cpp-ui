@@ -512,6 +512,9 @@ describe("gateway skeleton", () => {
       async evictModel() {
         throw new Error("not implemented");
       },
+      async retryDownload() {
+        throw new Error("not implemented");
+      },
       recordRequestTrace() {},
     };
     const gateway = {
@@ -605,6 +608,47 @@ describe("gateway skeleton", () => {
     expect(downloadCreateResponse.statusCode).toBe(400);
     expect(downloadCreateResponse.json()).toMatchObject({
       error: "validation_error",
+    });
+  });
+
+  it("handles dedicated retry actions for download tasks", async () => {
+    const gateway = await createTestGateway();
+
+    const missingIdResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        action: "retry",
+      },
+    });
+
+    const retryResponse = await gateway.controlApp.inject({
+      method: "POST",
+      url: "/control/downloads",
+      headers: {
+        authorization: "Bearer control-secret",
+      },
+      payload: {
+        action: "retry",
+        id: "download-demo-1",
+      },
+    });
+
+    expect(missingIdResponse.statusCode).toBe(400);
+    expect(missingIdResponse.json()).toMatchObject({
+      error: "invalid_request",
+      message: "Download id is required for retry.",
+    });
+    expect(retryResponse.statusCode).toBe(202);
+    expect(retryResponse.json()).toMatchObject({
+      accepted: true,
+      task: expect.objectContaining({
+        id: "download-demo-1",
+        status: "downloading",
+      }),
     });
   });
 
@@ -725,6 +769,9 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async resumeDownload() {
+        throw new Error("not implemented");
+      },
+      async retryDownload() {
         throw new Error("not implemented");
       },
       async deleteDownload() {

@@ -1161,16 +1161,25 @@ export class MockGatewayRuntime {
     }
 
     task.status = "downloading";
+    task.errorMessage = undefined;
     task.updatedAt = new Date().toISOString();
-    task.files = task.files.map((file) => ({
-      ...file,
-      status: file.status === "completed" ? "completed" : "downloading",
-      updatedAt: task.updatedAt,
-    }));
+    task.files = task.files.map((file) => {
+      const nextFile = { ...file };
+      nextFile.errorMessage = undefined;
+      return {
+        ...nextFile,
+        status: file.status === "completed" ? "completed" : "downloading",
+        updatedAt: task.updatedAt,
+      };
+    });
     return {
       accepted: true,
       task: structuredClone(task),
     };
+  }
+
+  retryDownload(id: string, traceId?: string): DesktopDownloadActionResponse {
+    return this.resumeDownload(id, traceId);
   }
 
   deleteDownload(

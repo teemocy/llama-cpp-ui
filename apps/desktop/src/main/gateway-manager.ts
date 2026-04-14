@@ -1230,6 +1230,22 @@ export class GatewayManager extends EventEmitter {
     return desktopDownloadActionResponseSchema.parse(payload);
   }
 
+  async retryDownload(id: string): Promise<DesktopDownloadActionResponse> {
+    const discovery = this.requireDiscovery();
+    const payload = await this.readJsonResponse(
+      fetch(`${discovery.controlBaseUrl}/control/downloads`, {
+        method: "POST",
+        headers: this.createControlHeaders({
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ action: "retry", id }),
+      }),
+      "Unable to retry download task.",
+    );
+
+    return desktopDownloadActionResponseSchema.parse(payload);
+  }
+
   async deleteDownload(
     id: string,
     options: { deleteFiles?: boolean } = {},

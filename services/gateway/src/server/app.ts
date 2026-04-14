@@ -658,6 +658,18 @@ async function registerControlApp(
       return reply.code(202).send(await runtime.resumeDownload(payload.id, request.id));
     }
 
+    if (action === "retry") {
+      if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+        return reply.code(400).send({
+          error: "invalid_request",
+          message: "Download id is required for retry.",
+          requestId: request.id,
+        });
+      }
+
+      return reply.code(202).send(await runtime.retryDownload(payload.id, request.id));
+    }
+
     if (action === "delete") {
       if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
         return reply.code(400).send({

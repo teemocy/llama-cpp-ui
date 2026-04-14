@@ -525,6 +525,85 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     expect(modelsRepository.list()).toHaveLength(0);
   }, 15_000);
 
+  it("retries a failed download and completes after a transient provider error", async () => {
+    const supportRoot = await createSupportRoot();
+    const payload = createSampleGgufBuffer("Flaky Tiny Chat");
+    const checksumSha256 = createSha256(payload);
+    let shouldFail = true;
+    let requestCount = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/flaky.gguf") {
+        requestCount += 1;
+        if (shouldFail) {
+          shouldFail = false;
+          response.writeHead(503).end("temporary failure");
+          return;
+        }
+        handleArtifactRequest(request, response, payload);
+        return;
+      }
+
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    cleanups.push(() => server.close());
+    const port = (server.address() as { port: number }).port;
+
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const modelsRepository = new ModelsRepository(database.database);
+    const manager = new LlamaCppModelManager({
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      adapter: createLlamaCppAdapter({
+        supportRoot,
+        preferFakeWorker: true,
+      }),
+      modelsRepository,
+      engineVersionsRepository: new EngineVersionsRepository(database.database),
+    });
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelManager: manager,
+      providerSearch: new ProviderSearchService([
+        new FakeProvider({
+          provider: "huggingface",
+          artifactId: "flaky-stage3-tiny-chat-q4",
+          url: `http://127.0.0.1:${port}/flaky.gguf`,
+          headers: {},
+          fileName: "flaky-stage3-tiny-chat-q4.gguf",
+          checksum: {
+            algorithm: "sha256",
+            value: checksumSha256,
+            source: "provider",
+            status: "verified",
+          },
+          supportsRange: true,
+          estimatedSizeBytes: payload.length,
+        }),
+      ]),
+      chunkBytes: 128,
+    });
+
+    const started = await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId: "acme/flaky-stage3-tiny-chat",
+      artifactId: "flaky-stage3-tiny-chat-q4",
+      displayName: "Flaky Tiny Chat",
+    });
+
+    const failed = await downloads.resumeDownload(started.id);
+    expect(failed.status).toBe("error");
+    expect(failed.errorMessage).toContain("status 503");
+
+    const retried = await downloads.resumeDownload(started.id);
+    expect(retried.status).toBe("completed");
+    expect(requestCount).toBeGreaterThanOrEqual(2);
+    expect(modelsRepository.list()).toHaveLength(1);
+  }, 15_000);
+
   it("downloads every shard in a bundle and registers only the primary shard once complete", async () => {
     const supportRoot = await createSupportRoot();
     const primaryPayload = createSampleGgufBuffer("Bundle Tiny Chat");

@@ -2283,6 +2283,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     });
   }
 
+  async retryDownload(id: string, _traceId?: string): Promise<DesktopDownloadActionResponse> {
+    const task = await this.#downloadManager.resumeDownload(id);
+    return desktopDownloadActionResponseSchema.parse({
+      accepted: true,
+      task: toDownloadRecord(task),
+    });
+  }
+
   async deleteDownload(
     id: string,
     options: { deleteFiles?: boolean } = {},

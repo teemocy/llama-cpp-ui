@@ -168,6 +168,7 @@ export interface GatewayRuntime {
   ): MaybePromise<DesktopDownloadActionResponse>;
   pauseDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   resumeDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
+  retryDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   deleteDownload(
     id: string,
     options?: { deleteFiles?: boolean },
