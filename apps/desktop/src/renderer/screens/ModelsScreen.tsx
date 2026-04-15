@@ -953,6 +953,23 @@ export function ModelsScreen({
                 <p>{formatModelCardSummary(selectedModel)}</p>
               </div>
               <div className="modal-shell-actions">
+                <span
+                  className={
+                    selectedModel.loaded
+                      ? "status-pill status-pill-caution"
+                      : `status-pill ${getStateToneClass(selectedModel.state)}`
+                  }
+                >
+                  {selectedModel.loaded ? "Loaded in memory" : humanize(selectedModel.state)}
+                </span>
+                <button
+                  className={detailModelAction === "evict" ? "secondary-button" : "primary-button"}
+                  disabled={detailModelActionDisabled}
+                  onClick={() => void runModelAction(detailModelAction)}
+                  type="button"
+                >
+                  {detailModelActionLabel}
+                </button>
                 <button className="secondary-button" onClick={closeModelConfigPanel} type="button">
                   Close
                 </button>
@@ -989,7 +1006,15 @@ export function ModelsScreen({
                       </button>
                     </div>
                   </div>
-                  <span className="status-pill status-pill-positive">No eviction needed</span>
+                  <span
+                    className={
+                      selectedModel.loaded
+                        ? "status-pill status-pill-neutral"
+                        : "status-pill status-pill-positive"
+                    }
+                  >
+                    {selectedModel.loaded ? "Alias edits stay live" : "No eviction needed"}
+                  </span>
                 </div>
               </div>
 
@@ -1015,8 +1040,12 @@ export function ModelsScreen({
                 </div>
                 <p>
                   {selectedModelUsesLlamaRuntime
-                    ? "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
-                    : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
+                    ? selectedModel.loaded
+                      ? "These settings persist to the model profile and apply on the next preload. Use Evict from memory above first so the runtime key stays consistent."
+                      : "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
+                    : selectedModel.loaded
+                      ? "MLX models only expose cross-engine settings in this build. Use Evict from memory above first so the runtime key stays consistent."
+                      : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
                 </p>
 
                 <div className="settings-grid">
