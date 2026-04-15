@@ -1185,6 +1185,72 @@ describe("gateway stage 2 runtime", () => {
     await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
   });
 
+  it.runIf(supportsMlxTests)(
+    "fails preload before worker startup when a registered MLX directory is incomplete",
+    async () => {
+      const fixture = await createStage2Fixture();
+      const gateway = await buildGateway({
+        config: createTestConfig(),
+        runtime: fixture.runtime,
+      });
+      const artifactPath = path.join(
+        fixture.appPaths.supportRoot,
+        "models",
+        "missing-mlx-files-after-register",
+      );
+
+      await writeSampleMlxModelDirectory(artifactPath);
+      await Promise.all([gateway.publicApp.ready(), gateway.controlApp.ready()]);
+
+      const registerResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/register-local",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          filePath: artifactPath,
+          displayName: "Missing MLX Files After Register",
+        },
+      });
+
+      expect(registerResponse.statusCode).toBe(201);
+      const registeredModelId = registerResponse.json().model.id as string;
+
+      await rm(path.join(artifactPath, "config.json"), { force: true });
+
+      const preloadResponse = await gateway.controlApp.inject({
+        method: "POST",
+        url: "/control/models/preload",
+        headers: {
+          authorization: "Bearer control-secret-stage2",
+        },
+        payload: {
+          modelId: registeredModelId,
+        },
+      });
+
+      expect(preloadResponse.statusCode).toBe(409);
+      expect(preloadResponse.json()).toMatchObject({
+        error: "model_load_failed",
+        message: `MLX model directory is incomplete at ${artifactPath}. Re-download the MLX bundle to restore missing files.`,
+      });
+
+      const desktopModels = await fixture.runtime.listDesktopModels();
+      expect(desktopModels).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: registeredModelId,
+            artifactStatus: "missing",
+            loaded: false,
+          }),
+        ]),
+      );
+
+      await Promise.allSettled([gateway.publicApp.close(), gateway.controlApp.close()]);
+    },
+  );
+
   it("emits shared lifecycle events in load and evict order", async () => {
     const fixture = await createStage2Fixture();
     const gateway = await buildGateway({

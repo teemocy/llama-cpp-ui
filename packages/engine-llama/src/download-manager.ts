@@ -227,13 +227,18 @@ function resolveRegistrationPath(localModelsDir: string, metadata: DownloadTaskM
     return engineType === "mlx" ? path.dirname(metadata.destinationPath) : metadata.destinationPath;
   }
 
+  const providerRoot = path.join(localModelsDir, sanitizePathPart(metadata.providerModelId));
+  const sanitizedRegistrationSegments = sanitizeRelativeSegments(metadata.registrationPath);
+  const sanitizedRegistrationPath =
+    sanitizedRegistrationSegments.length > 0
+      ? path.join(...sanitizedRegistrationSegments)
+      : undefined;
+
   return path.isAbsolute(metadata.registrationPath)
     ? metadata.registrationPath
-    : path.join(
-        localModelsDir,
-        sanitizePathPart(metadata.providerModelId),
-        metadata.registrationPath,
-      );
+    : sanitizedRegistrationPath
+      ? path.join(providerRoot, sanitizedRegistrationPath)
+      : providerRoot;
 }
 
 function toTaskMetadata(task: DownloadTask): DownloadTaskMetadata {

@@ -918,6 +918,114 @@ describe("llama.cpp stage 3 provider search and downloads", () => {
     expect(tasks[0]?.files.find((file) => file.artifactId === "mlx-config")?.status).toBe("error");
   }, 15_000);
 
+  it("sanitizes MLX registration paths before registering bundle models", async () => {
+    const supportRoot = await createSupportRoot();
+    const database = createTestDatabase();
+    cleanups.push(database.cleanup);
+
+    const tokenizerPayload = Buffer.from('{"model":"bpe"}\n', "utf8");
+    const shardPayload = Buffer.from("mlx shard payload", "utf8");
+    const registrarCalls: string[] = [];
+    const downloads = new LlamaCppDownloadManager({
+      supportRoot,
+      downloadsRepository: new DownloadTasksRepository(database.database),
+      modelRegistrars: {
+        mlx: {
+          async registerLocalModel(options) {
+            registrarCalls.push(options.filePath);
+            return {
+              artifact: {
+                id: "model_stage3_mlx_sanitized",
+                sizeBytes: tokenizerPayload.length + shardPayload.length,
+              },
+              profile: {
+                displayName: "Stage3 MLX Sanitized",
+              },
+            };
+          },
+        },
+      },
+      providerSearch: new ProviderSearchService([
+        new FakeProvider([
+          {
+            provider: "huggingface",
+            artifactId: "mlx-tokenizer",
+            url: "https://example.invalid/mlx/tokenizer.json",
+            headers: {},
+            fileName: "Qwen3.5-0.8B-8bit(MLX)/tokenizer.json",
+            supportsRange: false,
+            estimatedSizeBytes: tokenizerPayload.length,
+          },
+          {
+            provider: "huggingface",
+            artifactId: "mlx-shard",
+            url: "https://example.invalid/mlx/model.safetensors",
+            headers: {},
+            fileName: "Qwen3.5-0.8B-8bit(MLX)/model.safetensors",
+            supportsRange: false,
+            estimatedSizeBytes: shardPayload.length,
+          },
+        ]),
+      ]),
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/tokenizer.json")) {
+          return new Response(tokenizerPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(tokenizerPayload.length),
+            },
+          });
+        }
+        if (url.endsWith("/model.safetensors")) {
+          return new Response(shardPayload, {
+            status: 200,
+            headers: {
+              "content-length": String(shardPayload.length),
+            },
+          });
+        }
+
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const bundleId = "stage3-mlx-sanitized-path";
+    const providerModelId = "Qwen/Qwen3.5-0.8B-8bit(MLX)";
+    const registrationPath = "Qwen3.5-0.8B-8bit(MLX)";
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId,
+      artifactId: "mlx-tokenizer",
+      displayName: "Qwen3.5 0.8B 8bit MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-tokenizer",
+      engineType: "mlx",
+      registrationPath,
+    });
+    await downloads.startDownload({
+      provider: "huggingface",
+      providerModelId,
+      artifactId: "mlx-shard",
+      displayName: "Qwen3.5 0.8B 8bit MLX",
+      bundleId,
+      bundlePrimaryArtifactId: "mlx-tokenizer",
+      engineType: "mlx",
+      registrationPath,
+    });
+
+    await waitFor(() => registrarCalls.length === 1);
+
+    expect(registrarCalls).toEqual([
+      path.join(
+        supportRoot,
+        "models",
+        "Qwen-Qwen3.5-0.8B-8bit-MLX",
+        "Qwen3.5-0.8B-8bit-MLX",
+      ),
+    ]);
+  }, 15_000);
+
   it("repairs stale MLX bundle errors once the bundle exists on disk", async () => {
     const supportRoot = await createSupportRoot();
     const database = createTestDatabase();

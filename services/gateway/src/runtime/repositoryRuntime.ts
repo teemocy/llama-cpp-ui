@@ -963,7 +963,17 @@ function getCreatedEpochSeconds(artifact: ModelArtifact): number {
 }
 
 function getArtifactStatus(artifact: ModelArtifact): "available" | "missing" {
-  return existsSync(artifact.localPath) ? "available" : "missing";
+  if (!existsSync(artifact.localPath)) {
+    return "missing";
+  }
+
+  if (artifact.format === "mlx") {
+    const modelDirectory = path.resolve(artifact.localPath);
+    const hasConfigFile = existsSync(path.join(modelDirectory, MLX_CONFIG_FILE));
+    return isMlxModelDirectoryPath(modelDirectory) && hasConfigFile ? "available" : "missing";
+  }
+
+  return "available";
 }
 
 function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
@@ -993,6 +1003,10 @@ function validateBatchSize(batchSize: number | undefined): void {
 }
 
 function getMissingArtifactMessage(artifact: ModelArtifact): string {
+  if (artifact.format === "mlx") {
+    return `MLX model directory is incomplete at ${artifact.localPath}. Re-download the MLX bundle to restore missing files.`;
+  }
+
   return `Local artifact is missing from ${artifact.localPath}.`;
 }
 
@@ -3425,12 +3439,22 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       );
     }
 
+    const normalizedPayload =
+      worker.profile.engineType === "mlx"
+        ? {
+            ...payload,
+            // mlx_lm validates request.model against the served model id (/v1/models),
+            // which is the local model path for local directories.
+            model: worker.artifact.localPath,
+          }
+        : payload;
+
     const response = await fetch(`${this.getWorkerBaseUrl(worker)}${endpoint}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(normalizedPayload),
     }).catch((error: unknown) => {
       throw new GatewayRequestError(
         "worker_request_failed",
