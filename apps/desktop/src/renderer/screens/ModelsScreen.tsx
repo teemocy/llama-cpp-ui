@@ -789,9 +789,6 @@ export function ModelsScreen({
       if (selectedModelRequiresPooledRuntime && batchSize !== ubatchSize) {
         throw new Error("Embedding and rerank models must use the same ubatch size as batch size.");
       }
-      if (selectedModelRequiresPooledRuntime && configDraft.poolingMethod.length === 0) {
-        throw new Error("Embedding and rerank models require a pooling method.");
-      }
 
       const result = await onUpdateModelConfig(selectedModel.id, {
         ...basePayload,
@@ -1072,8 +1069,8 @@ export function ModelsScreen({
                 </p>
                 {selectedModelRequiresPooledRuntime ? (
                   <p>
-                    Embedding and rerank workers need matching batch and ubatch sizes, plus an
-                    explicit pooling method, before the next preload.
+                    Embedding and rerank workers need matching batch and ubatch sizes. If pooling
+                    is left unset, llama.cpp will use the model default.
                   </p>
                 ) : null}
 

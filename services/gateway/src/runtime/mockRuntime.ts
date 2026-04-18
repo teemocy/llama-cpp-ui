@@ -32,6 +32,8 @@ import {
   type GatewayEvent,
   type OpenAiModelCard,
   type OpenAiToolCall,
+  type RerankRequest,
+  type RerankResponse,
   chatCompletionsChunkSchema,
   gatewayEventSchema,
 } from "@localhub/shared-contracts";
@@ -39,6 +41,7 @@ import {
   chatContentHasImages,
   countChatContentTokens,
   createChatSessionTitle,
+  estimateTextTokens,
   formatChatContentSummary,
 } from "./chat-content.js";
 
@@ -102,6 +105,14 @@ const CAPABILITY_LABELS = {
   promptCache: "prompt-cache",
 } as const;
 type CapabilityOverrideMap = NonNullable<DesktopModelConfigUpdateRequest["capabilityOverrides"]>;
+
+function normalizeRerankDocumentText(value: RerankRequest["documents"][number]): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return value.text;
+}
 
 interface StreamedAssistantAccumulator {
   responseId?: string;
@@ -237,20 +248,12 @@ function validateEmbeddingRoleConfig(model: DesktopModelRecord): void {
     return;
   }
 
-  const batchSize = model.batchSize ?? DEFAULT_BATCH_SIZE;
+  const batchSize = model.batchSize ?? DEFAULT_UBATCH_SIZE;
   const ubatchSize = model.ubatchSize ?? DEFAULT_UBATCH_SIZE;
   if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
       "invalid_ubatch_size",
       "Embedding and rerank models must use the same ubatch size as batch size.",
-      400,
-    );
-  }
-
-  if (!model.poolingMethod) {
-    throw new GatewayRequestError(
-      "missing_pooling_method",
-      "Embedding and rerank models require a pooling method override.",
       400,
     );
   }
@@ -533,6 +536,7 @@ function mapRequestRoute(method: string, path: string): RuntimeEventRoute | null
     case "GET /control/models":
     case "POST /v1/chat/completions":
     case "POST /v1/embeddings":
+    case "POST /v1/rerank":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
@@ -1437,6 +1441,13 @@ export class MockGatewayRuntime {
     updated.role = getModelRole(
       createModel(resolvedModelId, Math.floor(Date.now() / 1000), updated.capabilities),
     );
+    if (
+      (updated.role === "embeddings" || updated.role === "rerank") &&
+      input.batchSize === undefined &&
+      input.ubatchSize === undefined
+    ) {
+      updated.batchSize = updated.ubatchSize ?? DEFAULT_UBATCH_SIZE;
+    }
     validateBatchSettings(
       updated.batchSize ?? DEFAULT_BATCH_SIZE,
       updated.ubatchSize ?? DEFAULT_UBATCH_SIZE,
@@ -1703,6 +1714,54 @@ export class MockGatewayRuntime {
     };
   }
 
+  createRerank(input: RerankRequest, _context: GatewayExecutionContext): RerankResponse {
+    const model = this.getModel(input.model);
+    if (!model) {
+      throw new Error(`Unknown model: ${input.model}`);
+    }
+    if (!model.capabilities.includes("rerank")) {
+      throw new GatewayRequestError(
+        "unsupported_model_capability",
+        `Model ${input.model} does not support rerank requests.`,
+        409,
+      );
+    }
+
+    const queryTokens = new Set(
+      input.query
+        .toLowerCase()
+        .split(/[^a-z0-9]+/i)
+        .filter((token) => token.length >= 3),
+    );
+    const results = input.documents
+      .map((document, index) => {
+        const text = normalizeRerankDocumentText(document).toLowerCase();
+        const tokenMatches = [...queryTokens].filter((token) => text.includes(token)).length;
+        return {
+          index,
+          relevance_score: Number((tokenMatches / Math.max(queryTokens.size, 1)).toFixed(6)),
+        };
+      })
+      .sort((left, right) => right.relevance_score - left.relevance_score || left.index - right.index);
+
+    return {
+      object: "list",
+      model: input.model,
+      usage: {
+        prompt_tokens: estimateTextTokens([
+          input.query,
+          ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+        ]),
+        total_tokens: estimateTextTokens([
+          input.query,
+          ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+        ]),
+      },
+      results:
+        input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
+    };
+  }
+
   recordRequestTrace(payload: RequestTraceRecord): void {
     const route = mapRequestRoute(payload.method, payload.path);
     if (!route) {
@@ -1761,6 +1820,9 @@ export class MockGatewayRuntime {
           capabilities,
         }
       : createModel(modelId, Math.floor(Date.now() / 1000), capabilities);
+    const role = getModelRole(effectiveModel);
+    const pooledRuntime = role === "embeddings" || role === "rerank";
+    const ubatchSize = existing?.ubatchSize ?? DEFAULT_UBATCH_SIZE;
 
     return {
       id: modelId,
@@ -1774,7 +1836,7 @@ export class MockGatewayRuntime {
       format: "gguf",
       capabilities,
       capabilityOverrides,
-      role: getModelRole(effectiveModel),
+      role,
       tags: existing?.tags ?? ["mock"],
       localPath:
         overrides.localPath ??
@@ -1784,8 +1846,8 @@ export class MockGatewayRuntime {
       pinned: existing?.pinned ?? false,
       defaultTtlMs: existing?.defaultTtlMs ?? 900_000,
       contextLength: existing?.contextLength ?? 8192,
-      batchSize: existing?.batchSize ?? DEFAULT_BATCH_SIZE,
-      ubatchSize: existing?.ubatchSize ?? DEFAULT_UBATCH_SIZE,
+      batchSize: existing?.batchSize ?? (pooledRuntime ? ubatchSize : DEFAULT_BATCH_SIZE),
+      ubatchSize,
       gpuLayers: existing?.gpuLayers ?? 20,
       parallelSlots: existing?.parallelSlots,
       flashAttentionType: existing?.flashAttentionType ?? "auto",

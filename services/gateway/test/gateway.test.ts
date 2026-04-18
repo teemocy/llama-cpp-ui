@@ -465,7 +465,7 @@ describe("gateway skeleton", () => {
     });
   });
 
-  it("requires pooling and matched ubatch sizing when switching a model into embeddings mode", async () => {
+  it("allows switching a model into embeddings mode without an explicit pooling override", async () => {
     const gateway = await createTestGateway();
 
     const response = await gateway.controlApp.inject({
@@ -484,9 +484,13 @@ describe("gateway skeleton", () => {
       },
     });
 
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      error: "missing_pooling_method",
+      model: expect.objectContaining({
+        role: "embeddings",
+        batchSize: 3072,
+        ubatchSize: 3072,
+      }),
     });
   });
 
@@ -542,6 +546,9 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async retryDownload() {
+        throw new Error("not implemented");
+      },
+      async createRerank() {
         throw new Error("not implemented");
       },
       recordRequestTrace() {},
@@ -842,6 +849,9 @@ describe("gateway skeleton", () => {
         throw new Error("not implemented");
       },
       async createEmbeddings() {
+        throw new Error("not implemented");
+      },
+      async createRerank() {
         throw new Error("not implemented");
       },
       recordRequestTrace() {},

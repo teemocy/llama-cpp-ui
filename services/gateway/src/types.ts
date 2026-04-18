@@ -25,6 +25,8 @@ import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
   OpenAiModelCard,
+  RerankRequest,
+  RerankResponse,
   RequestRoute,
   RequestTrace,
   RuntimeKey,
@@ -198,5 +200,9 @@ export interface GatewayRuntime {
     input: EmbeddingsRequest,
     context: GatewayExecutionContext,
   ): MaybePromise<EmbeddingsResponse>;
+  createRerank(
+    input: RerankRequest,
+    context: GatewayExecutionContext,
+  ): MaybePromise<RerankResponse>;
   recordRequestTrace(payload: RequestTraceRecord): void;
 }

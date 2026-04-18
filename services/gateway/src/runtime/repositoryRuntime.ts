@@ -62,6 +62,8 @@ import {
   type GatewayEvent,
   type OpenAiModelCard,
   type OpenAiToolCall,
+  type RerankRequest,
+  type RerankResponse,
   chatCompletionsChunkSchema,
   chatCompletionsResponseSchema,
   desktopApiLogListSchema,
@@ -76,6 +78,7 @@ import {
   desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
   gatewayEventSchema,
+  rerankResponseSchema,
 } from "@localhub/shared-contracts";
 import type {
   CapabilitySet,
@@ -158,6 +161,10 @@ const CAPABILITY_OVERRIDE_KEYS: Array<Exclude<keyof CapabilitySet, "promptCache"
   "tools",
   "streaming",
 ];
+
+function isPooledRuntimeRole(role: ModelProfile["role"]): boolean {
+  return role === "embeddings" || role === "rerank";
+}
 type CapabilityOverrides = NonNullable<ModelProfile["capabilityOverrides"]>;
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
@@ -944,6 +951,14 @@ function getEffectiveBatchSize(profile: ModelProfile): number {
   return DEFAULT_BATCH_SIZE;
 }
 
+function getEffectiveBatchSizeForRole(profile: ModelProfile, role: ModelProfile["role"]): number {
+  if (!isPooledRuntimeRole(role) || profile.parameterOverrides.batchSize !== undefined) {
+    return getEffectiveBatchSize(profile);
+  }
+
+  return getEffectiveUBatchSize(profile);
+}
+
 function getEffectiveUBatchSize(profile: ModelProfile): number {
   const override = profile.parameterOverrides.ubatchSize;
   if (typeof override === "number" && Number.isFinite(override) && override > 0) {
@@ -1044,20 +1059,12 @@ function validateEmbeddingRoleOverrides(artifact: ModelArtifact, profile: ModelP
     return;
   }
 
-  const batchSize = getEffectiveBatchSize(profile);
+  const batchSize = getEffectiveBatchSizeForRole(profile, role);
   const ubatchSize = getEffectiveUBatchSize(profile);
   if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
       "invalid_ubatch_size",
       "Embedding and rerank models must use the same ubatch size as batch size.",
-      400,
-    );
-  }
-
-  if (!getEffectivePoolingMethod(profile)) {
-    throw new GatewayRequestError(
-      "missing_pooling_method",
-      "Embedding and rerank models require a pooling method override.",
       400,
     );
   }
@@ -1375,6 +1382,52 @@ function createFakeEmbeddingsResponse(input: EmbeddingsRequest): EmbeddingsRespo
   };
 }
 
+function normalizeRerankDocumentText(value: RerankRequest["documents"][number]): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return value.text;
+}
+
+function createFakeRerankResponse(input: RerankRequest): RerankResponse {
+  const queryTokens = new Set(
+    input.query
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .filter((token) => token.length >= 3),
+  );
+
+  const results = input.documents
+    .map((document, index) => {
+      const text = normalizeRerankDocumentText(document).toLowerCase();
+      const tokenMatches = [...queryTokens].filter((token) => text.includes(token)).length;
+      const score = tokenMatches / Math.max(queryTokens.size, 1);
+      return {
+        index,
+        relevance_score: Number(score.toFixed(6)),
+      };
+    })
+    .sort((left, right) => right.relevance_score - left.relevance_score || left.index - right.index);
+
+  return {
+    object: "list",
+    model: input.model,
+    usage: {
+      prompt_tokens: estimateTextTokens([
+        input.query,
+        ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+      ]),
+      total_tokens: estimateTextTokens([
+        input.query,
+        ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+      ]),
+    },
+    results:
+      input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
+  };
+}
+
 export function normalizeEmbeddingsResponsePayload(payload: unknown): unknown {
   if (!payload || typeof payload !== "object") {
     return payload;
@@ -1441,7 +1494,8 @@ function toDesktopModelRecord(
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const llamaRuntimeControls = profile.engineType === "llama.cpp";
-  const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
+  const role = getModelRole(stored.artifact, profile);
+  const batchSize = llamaRuntimeControls ? getEffectiveBatchSizeForRole(profile, role) : undefined;
   const ubatchSize = llamaRuntimeControls ? getEffectiveUBatchSize(profile) : undefined;
   const flashAttentionType = llamaRuntimeControls
     ? getEffectiveFlashAttentionType(profile)
@@ -1463,7 +1517,7 @@ function toDesktopModelRecord(
     format: stored.artifact.format,
     capabilities: getCapabilityList(stored.artifact, profile),
     capabilityOverrides,
-    role: getModelRole(stored.artifact, profile),
+    role,
     tags: stored.artifact.tags,
     localPath: stored.artifact.localPath,
     sourceKind: stored.artifact.source.kind,
@@ -1572,6 +1626,7 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "GET /control/models":
     case "POST /v1/chat/completions":
     case "POST /v1/embeddings":
+    case "POST /v1/rerank":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
@@ -2639,8 +2694,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     }
 
     if (resolved.profile.engineType === "llama.cpp") {
+      const role = getModelRole(resolved.artifact, resolved.profile);
       validateBatchSettings(
-        getEffectiveBatchSize(resolved.profile),
+        getEffectiveBatchSizeForRole(resolved.profile, role),
         getEffectiveUBatchSize(resolved.profile),
       );
       validateEmbeddingRoleOverrides(resolved.artifact, resolved.profile);
@@ -2692,6 +2748,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       context.traceId,
       requestRequiresVision(input.messages),
     );
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
 
     try {
@@ -2705,7 +2762,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         promptTokens: usage.promptTokens,
@@ -2723,7 +2780,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2747,6 +2804,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       context.traceId,
       requestRequiresVision(input.messages),
     );
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
     let firstChunkAt: number | undefined;
     let settled = false;
@@ -2855,7 +2913,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
               const safeDurationMs = Math.max(totalDurationMs, 1);
               this.insertApiLog({
                 traceId: context.traceId,
-                modelId: input.model,
+                modelId: logModelId,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2875,7 +2933,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
               controller.error(error);
               this.insertApiLog({
                 traceId: context.traceId,
-                modelId: input.model,
+                modelId: logModelId,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2895,7 +2953,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           await reader.cancel().catch(() => undefined);
           this.insertApiLog({
             traceId: context.traceId,
-            modelId: input.model,
+            modelId: logModelId,
             endpoint: "/v1/chat/completions",
             requestIp: context.remoteAddress,
             ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2915,7 +2973,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2935,6 +2993,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     context: GatewayExecutionContext,
   ): Promise<EmbeddingsResponse> {
     const worker = await this.acquireWorkerForRequest(input.model, "embeddings", context.traceId);
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
 
     try {
@@ -2945,7 +3004,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
         promptTokens: estimateTextTokens(input.input),
@@ -2958,7 +3017,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2969,6 +3028,48 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       throw error;
     } finally {
       this.releaseWorkerAfterRequest(worker, context.traceId, "Embeddings request finished.");
+    }
+  }
+
+  async createRerank(
+    input: RerankRequest,
+    context: GatewayExecutionContext,
+  ): Promise<RerankResponse> {
+    const worker = await this.acquireWorkerForRequest(input.model, "rerank", context.traceId);
+    const logModelId = worker.artifact.id;
+    const startedAt = Date.now();
+    const documents = input.documents.map((document) => normalizeRerankDocumentText(document));
+
+    try {
+      const response = await this.fetchWorkerResponse(worker, "/v1/rerank", input);
+      const payload = rerankResponseSchema.parse(worker.adapter.normalizeResponse(await response.json()));
+
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: logModelId,
+        endpoint: "/v1/rerank",
+        requestIp: context.remoteAddress,
+        promptTokens: estimateTextTokens([input.query, ...documents]),
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: response.status,
+        createdAt: nowIso(),
+      });
+
+      return payload;
+    } catch (error) {
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: logModelId,
+        endpoint: "/v1/rerank",
+        requestIp: context.remoteAddress,
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+        errorMessage: error instanceof Error ? error.message : "Rerank request failed.",
+        createdAt: nowIso(),
+      });
+      throw error;
+    } finally {
+      this.releaseWorkerAfterRequest(worker, context.traceId, "Rerank request finished.");
     }
   }
 
@@ -3370,7 +3471,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private ensureModelCapability(
     resolved: ResolvedModelRecord,
-    capability: "chat" | "embeddings" | "vision",
+    capability: "chat" | "embeddings" | "rerank" | "vision",
   ): void {
     if (!resolved.capabilities[capability]) {
       throw new GatewayRequestError(
@@ -3383,7 +3484,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async acquireWorkerForRequest(
     modelId: string,
-    capability: "chat" | "embeddings" | "vision",
+    capability: "chat" | "embeddings" | "rerank" | "vision",
     traceId: string,
     requiresVision = false,
   ): Promise<ManagedWorker> {
@@ -3492,8 +3593,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async fetchWorkerResponse(
     worker: ManagedWorker,
-    endpoint: "/v1/chat/completions" | "/v1/embeddings",
-    payload: ChatCompletionsRequest | EmbeddingsRequest,
+    endpoint: "/v1/chat/completions" | "/v1/embeddings" | "/v1/rerank",
+    payload: ChatCompletionsRequest | EmbeddingsRequest | RerankRequest,
   ): Promise<Response> {
     if (worker.harness.command.transport === "filesystem") {
       if (endpoint === "/v1/chat/completions") {
@@ -3509,6 +3610,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
                 },
               },
             );
+      }
+
+      if (endpoint === "/v1/rerank") {
+        return new Response(JSON.stringify(createFakeRerankResponse(payload as RerankRequest)), {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+          },
+        });
       }
 
       return new Response(

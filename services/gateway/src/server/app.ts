@@ -15,6 +15,7 @@ import {
   desktopLocalModelImportRequestSchema,
   desktopModelConfigUpdateRequestSchema,
   embeddingsRequestSchema,
+  rerankRequestSchema,
 } from "@localhub/shared-contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
@@ -322,6 +323,34 @@ async function registerPublicApp(
 
     try {
       const response = await runtime.createEmbeddings(parsed.data, {
+        traceId: request.id,
+        remoteAddress:
+          request.ip || request.socket?.remoteAddress || request.raw.socket?.remoteAddress,
+      });
+
+      return reply.code(200).send(response);
+    } catch (error) {
+      const formatted = toGatewayErrorResponse(error);
+      return reply.code(formatted.statusCode).send({
+        error: formatted.code,
+        message: formatted.message,
+        requestId: request.id,
+      });
+    }
+  });
+
+  app.post("/v1/rerank", async (request, reply) => {
+    const parsed = rerankRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "validation_error",
+        message: parsed.error.issues[0]?.message ?? "A valid rerank request is required.",
+        requestId: request.id,
+      });
+    }
+
+    try {
+      const response = await runtime.createRerank(parsed.data, {
         traceId: request.id,
         remoteAddress:
           request.ip || request.socket?.remoteAddress || request.raw.socket?.remoteAddress,
