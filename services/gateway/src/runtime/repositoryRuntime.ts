@@ -15,9 +15,9 @@ import {
   openDatabase,
 } from "@localhub/db";
 import {
-  runtimeKeyToString,
   type EngineAdapter,
   type EngineInstallResult,
+  runtimeKeyToString,
 } from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
@@ -62,6 +62,8 @@ import {
   type GatewayEvent,
   type OpenAiModelCard,
   type OpenAiToolCall,
+  type RerankRequest,
+  type RerankResponse,
   chatCompletionsChunkSchema,
   chatCompletionsResponseSchema,
   desktopApiLogListSchema,
@@ -76,12 +78,14 @@ import {
   desktopModelConfigUpdateResponseSchema,
   embeddingsResponseSchema,
   gatewayEventSchema,
+  rerankResponseSchema,
 } from "@localhub/shared-contracts";
 import type {
   CapabilitySet,
   FlashAttentionType,
   ModelArtifact,
   ModelProfile,
+  PoolingMethod,
 } from "@localhub/shared-contracts/foundation-models";
 import type {
   ChatMessage,
@@ -157,6 +161,10 @@ const CAPABILITY_OVERRIDE_KEYS: Array<Exclude<keyof CapabilitySet, "promptCache"
   "tools",
   "streaming",
 ];
+
+function isPooledRuntimeRole(role: ModelProfile["role"]): boolean {
+  return role === "embeddings" || role === "rerank";
+}
 type CapabilityOverrides = NonNullable<ModelProfile["capabilityOverrides"]>;
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:Q\d(?:_[A-Z0-9]+)*|IQ\d(?:_[A-Z0-9]+)*|BF16|F16|F32|FP16|FP32|NF4)$/i;
@@ -474,6 +482,7 @@ function toDesktopProviderCatalogDetail(
           id: file.artifact.artifactId,
           artifactId: file.artifact.artifactId,
           artifactName: file.artifact.fileName,
+          ...(file.artifact.downloadUrl ? { downloadUrl: file.artifact.downloadUrl } : {}),
           ...(file.artifact.sizeBytes !== undefined ? { sizeBytes: file.artifact.sizeBytes } : {}),
           ...(file.artifact.quantization ? { quantization: file.artifact.quantization } : {}),
           ...(file.artifact.architecture ? { architecture: file.artifact.architecture } : {}),
@@ -942,6 +951,23 @@ function getEffectiveBatchSize(profile: ModelProfile): number {
   return DEFAULT_BATCH_SIZE;
 }
 
+function getEffectiveBatchSizeForRole(profile: ModelProfile, role: ModelProfile["role"]): number {
+  if (!isPooledRuntimeRole(role) || profile.parameterOverrides.batchSize !== undefined) {
+    return getEffectiveBatchSize(profile);
+  }
+
+  return getEffectiveUBatchSize(profile);
+}
+
+function getEffectiveUBatchSize(profile: ModelProfile): number {
+  const override = profile.parameterOverrides.ubatchSize;
+  if (typeof override === "number" && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+
+  return DEFAULT_UBATCH_SIZE;
+}
+
 function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionType {
   const override = profile.parameterOverrides.flashAttentionType;
   if (override === "enabled" || override === "disabled" || override === "auto") {
@@ -949,6 +975,21 @@ function getEffectiveFlashAttentionType(profile: ModelProfile): FlashAttentionTy
   }
 
   return "auto";
+}
+
+function getEffectivePoolingMethod(profile: ModelProfile): PoolingMethod | undefined {
+  const override = profile.parameterOverrides.poolingMethod;
+  if (
+    override === "none" ||
+    override === "mean" ||
+    override === "cls" ||
+    override === "last" ||
+    override === "rank"
+  ) {
+    return override;
+  }
+
+  return undefined;
 }
 
 function getCreatedEpochSeconds(artifact: ModelArtifact): number {
@@ -962,7 +1003,17 @@ function getCreatedEpochSeconds(artifact: ModelArtifact): number {
 }
 
 function getArtifactStatus(artifact: ModelArtifact): "available" | "missing" {
-  return existsSync(artifact.localPath) ? "available" : "missing";
+  if (!existsSync(artifact.localPath)) {
+    return "missing";
+  }
+
+  if (artifact.format === "mlx") {
+    const modelDirectory = path.resolve(artifact.localPath);
+    const hasConfigFile = existsSync(path.join(modelDirectory, MLX_CONFIG_FILE));
+    return isMlxModelDirectoryPath(modelDirectory) && hasConfigFile ? "available" : "missing";
+  }
+
+  return "available";
 }
 
 function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
@@ -970,28 +1021,60 @@ function hasRuntimeAffectingModelConfigChanges(input: DesktopModelConfigUpdateRe
     input.defaultTtlMs !== undefined ||
     input.contextLength !== undefined ||
     input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
     input.gpuLayers !== undefined ||
     input.parallelSlots !== undefined ||
     input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
     input.capabilityOverrides !== undefined
   );
 }
 
-function validateBatchSize(batchSize: number | undefined): void {
-  if (batchSize === undefined) {
+function hasLaunchAffectingModelConfigChanges(input: DesktopModelConfigUpdateRequest): boolean {
+  return (
+    input.contextLength !== undefined ||
+    input.batchSize !== undefined ||
+    input.ubatchSize !== undefined ||
+    input.gpuLayers !== undefined ||
+    input.parallelSlots !== undefined ||
+    input.flashAttentionType !== undefined ||
+    input.poolingMethod !== undefined ||
+    input.capabilityOverrides !== undefined
+  );
+}
+
+function validateBatchSettings(batchSize: number, ubatchSize: number): void {
+  if (batchSize % ubatchSize !== 0) {
+    throw new GatewayRequestError(
+      "invalid_batch_size",
+      `Batch size must be a multiple of ubatch size (${ubatchSize}).`,
+      400,
+    );
+  }
+}
+
+function validateEmbeddingRoleOverrides(artifact: ModelArtifact, profile: ModelProfile): void {
+  const role = getModelRole(artifact, profile);
+  if (role !== "embeddings" && role !== "rerank") {
     return;
   }
 
-  if (batchSize % DEFAULT_UBATCH_SIZE !== 0) {
+  const batchSize = getEffectiveBatchSizeForRole(profile, role);
+  const ubatchSize = getEffectiveUBatchSize(profile);
+  if (batchSize !== ubatchSize) {
     throw new GatewayRequestError(
-      "invalid_batch_size",
-      `Batch size must be a multiple of ${DEFAULT_UBATCH_SIZE}.`,
+      "invalid_ubatch_size",
+      "Embedding and rerank models must use the same ubatch size as batch size.",
       400,
     );
   }
 }
 
 function getMissingArtifactMessage(artifact: ModelArtifact): string {
+  if (artifact.format === "mlx") {
+    return `MLX model directory is incomplete at ${artifact.localPath}. Re-download the MLX bundle to restore missing files.`;
+  }
+
   return `Local artifact is missing from ${artifact.localPath}.`;
 }
 
@@ -1299,6 +1382,52 @@ function createFakeEmbeddingsResponse(input: EmbeddingsRequest): EmbeddingsRespo
   };
 }
 
+function normalizeRerankDocumentText(value: RerankRequest["documents"][number]): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return value.text;
+}
+
+function createFakeRerankResponse(input: RerankRequest): RerankResponse {
+  const queryTokens = new Set(
+    input.query
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .filter((token) => token.length >= 3),
+  );
+
+  const results = input.documents
+    .map((document, index) => {
+      const text = normalizeRerankDocumentText(document).toLowerCase();
+      const tokenMatches = [...queryTokens].filter((token) => text.includes(token)).length;
+      const score = tokenMatches / Math.max(queryTokens.size, 1);
+      return {
+        index,
+        relevance_score: Number(score.toFixed(6)),
+      };
+    })
+    .sort((left, right) => right.relevance_score - left.relevance_score || left.index - right.index);
+
+  return {
+    object: "list",
+    model: input.model,
+    usage: {
+      prompt_tokens: estimateTextTokens([
+        input.query,
+        ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+      ]),
+      total_tokens: estimateTextTokens([
+        input.query,
+        ...input.documents.map((document) => normalizeRerankDocumentText(document)),
+      ]),
+    },
+    results:
+      input.top_n !== undefined ? results.slice(0, Math.max(1, input.top_n)) : results,
+  };
+}
+
 export function normalizeEmbeddingsResponsePayload(payload: unknown): unknown {
   if (!payload || typeof payload !== "object") {
     return payload;
@@ -1365,10 +1494,13 @@ function toDesktopModelRecord(
   const artifactStatus = getArtifactStatus(stored.artifact);
   const contextLength = getEffectiveContextLength(stored.artifact, profile);
   const llamaRuntimeControls = profile.engineType === "llama.cpp";
-  const batchSize = llamaRuntimeControls ? getEffectiveBatchSize(profile) : undefined;
+  const role = getModelRole(stored.artifact, profile);
+  const batchSize = llamaRuntimeControls ? getEffectiveBatchSizeForRole(profile, role) : undefined;
+  const ubatchSize = llamaRuntimeControls ? getEffectiveUBatchSize(profile) : undefined;
   const flashAttentionType = llamaRuntimeControls
     ? getEffectiveFlashAttentionType(profile)
     : undefined;
+  const poolingMethod = llamaRuntimeControls ? getEffectivePoolingMethod(profile) : undefined;
   const errorMessage =
     artifactStatus === "missing" ? getMissingArtifactMessage(stored.artifact) : snapshot?.lastError;
   const capabilityOverrides = normalizeCapabilityOverrides(profile.capabilityOverrides);
@@ -1385,7 +1517,7 @@ function toDesktopModelRecord(
     format: stored.artifact.format,
     capabilities: getCapabilityList(stored.artifact, profile),
     capabilityOverrides,
-    role: getModelRole(stored.artifact, profile),
+    role,
     tags: stored.artifact.tags,
     localPath: stored.artifact.localPath,
     sourceKind: stored.artifact.source.kind,
@@ -1395,7 +1527,9 @@ function toDesktopModelRecord(
     ...(stored.artifact.quantization ? { quantization: stored.artifact.quantization } : {}),
     ...(contextLength !== undefined ? { contextLength } : {}),
     ...(batchSize !== undefined ? { batchSize } : {}),
+    ...(ubatchSize !== undefined ? { ubatchSize } : {}),
     ...(flashAttentionType !== undefined ? { flashAttentionType } : {}),
+    ...(poolingMethod !== undefined ? { poolingMethod } : {}),
     ...(stored.artifact.metadata.parameterCount !== undefined
       ? { parameterCount: stored.artifact.metadata.parameterCount }
       : {}),
@@ -1492,6 +1626,7 @@ function mapRequestRoute(method: string, pathName: string): RuntimeEventRoute | 
     case "GET /control/models":
     case "POST /v1/chat/completions":
     case "POST /v1/embeddings":
+    case "POST /v1/rerank":
     case "POST /control/models/preload":
     case "POST /control/models/evict":
     case "POST /control/models/register-local":
@@ -2186,37 +2321,79 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): Promise<DesktopDownloadActionResponse> {
     this.assertAcceptingNewWork();
-    const metadata =
+    const baseMetadata =
       input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
         ? input.metadata
         : {};
-    const task = await this.#downloadManager.startDownload({
-      provider: input.provider,
-      providerModelId: input.providerModelId,
-      artifactId: input.artifactId,
-      ...(input.taskGroupId ? { taskGroupId: input.taskGroupId } : {}),
-      displayName: input.title,
-      ...(typeof metadata.autoRegister === "boolean"
-        ? { autoRegister: metadata.autoRegister }
-        : {}),
-      ...(typeof metadata.bundleId === "string" && metadata.bundleId.length > 0
-        ? { bundleId: metadata.bundleId }
-        : {}),
-      ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
-      metadata.bundlePrimaryArtifactId.length > 0
-        ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
-        : {}),
-      ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
-        ? { engineType: metadata.engineType }
-        : {}),
-      ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
-        ? { registrationPath: metadata.registrationPath }
-        : {}),
-      ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
-      ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
-        ? { auxiliaryKind: metadata.auxiliaryKind }
-        : {}),
-    });
+    const requestedFiles =
+      input.files && input.files.length > 0
+        ? input.files.map((file) => ({
+            ...file,
+            metadata:
+              file.metadata && typeof file.metadata === "object" && !Array.isArray(file.metadata)
+                ? { ...baseMetadata, ...file.metadata }
+                : baseMetadata,
+          }))
+        : [
+            {
+              artifactId: input.artifactId,
+              artifactName: input.artifactName,
+              ...(input.downloadUrl ? { downloadUrl: input.downloadUrl } : {}),
+              ...(input.checksumSha256 ? { checksumSha256: input.checksumSha256 } : {}),
+              ...(input.sizeBytes !== undefined ? { sizeBytes: input.sizeBytes } : {}),
+              auxiliary: baseMetadata.auxiliary === true,
+              ...(typeof baseMetadata.auxiliaryKind === "string" &&
+              baseMetadata.auxiliaryKind.length > 0
+                ? { auxiliaryKind: baseMetadata.auxiliaryKind }
+                : {}),
+              metadata: baseMetadata,
+            },
+          ];
+    const taskGroupId =
+      input.taskGroupId ?? (requestedFiles.length > 1 ? `download-${randomUUID()}` : undefined);
+    const started = await Promise.all(
+      requestedFiles.map(async (file) => {
+        const metadata =
+          file.metadata && typeof file.metadata === "object" && !Array.isArray(file.metadata)
+            ? file.metadata
+            : {};
+        return await this.#downloadManager.startDownload({
+          provider: input.provider,
+          providerModelId: input.providerModelId,
+          artifactId: file.artifactId,
+          artifactName: file.artifactName,
+          ...(file.downloadUrl ? { downloadUrl: file.downloadUrl } : {}),
+          ...(file.checksumSha256 ? { checksumSha256: file.checksumSha256 } : {}),
+          ...(file.sizeBytes !== undefined ? { sizeBytes: file.sizeBytes } : {}),
+          ...(taskGroupId ? { taskGroupId } : {}),
+          displayName: input.title,
+          ...(typeof metadata.autoRegister === "boolean"
+            ? { autoRegister: metadata.autoRegister }
+            : {}),
+          ...(typeof metadata.bundleId === "string" && metadata.bundleId.length > 0
+            ? { bundleId: metadata.bundleId }
+            : {}),
+          ...(typeof metadata.bundlePrimaryArtifactId === "string" &&
+          metadata.bundlePrimaryArtifactId.length > 0
+            ? { bundlePrimaryArtifactId: metadata.bundlePrimaryArtifactId }
+            : {}),
+          ...(typeof metadata.engineType === "string" && metadata.engineType.length > 0
+            ? { engineType: metadata.engineType }
+            : {}),
+          ...(typeof metadata.registrationPath === "string" && metadata.registrationPath.length > 0
+            ? { registrationPath: metadata.registrationPath }
+            : {}),
+          ...(typeof metadata.auxiliary === "boolean" ? { auxiliary: metadata.auxiliary } : {}),
+          ...(typeof metadata.auxiliaryKind === "string" && metadata.auxiliaryKind.length > 0
+            ? { auxiliaryKind: metadata.auxiliaryKind }
+            : {}),
+        });
+      }),
+    );
+    const task = started[started.length - 1];
+    if (!task) {
+      throw new Error("Unable to enqueue download bundle.");
+    }
 
     return desktopDownloadActionResponseSchema.parse({
       accepted: true,
@@ -2233,6 +2410,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   async resumeDownload(id: string, _traceId?: string): Promise<DesktopDownloadActionResponse> {
+    const task = await this.#downloadManager.resumeDownload(id);
+    return desktopDownloadActionResponseSchema.parse({
+      accepted: true,
+      task: toDownloadRecord(task),
+    });
+  }
+
+  async retryDownload(id: string, _traceId?: string): Promise<DesktopDownloadActionResponse> {
     const task = await this.#downloadManager.resumeDownload(id);
     return desktopDownloadActionResponseSchema.parse({
       accepted: true,
@@ -2394,14 +2579,45 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     _traceId?: string,
   ): DesktopModelConfigUpdateResponse {
     const resolved = this.resolveModelRecord(modelId);
+    const nextProfile: ModelProfile = {
+      ...resolved.profile,
+      ...(input.displayName ? { displayName: input.displayName } : {}),
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
+      parameterOverrides: {
+        ...resolved.profile.parameterOverrides,
+        ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
+        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
+        ...(input.ubatchSize !== undefined ? { ubatchSize: input.ubatchSize } : {}),
+        ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
+        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
+        ...(input.flashAttentionType !== undefined
+          ? { flashAttentionType: input.flashAttentionType }
+          : {}),
+        ...(input.poolingMethod !== undefined ? { poolingMethod: input.poolingMethod } : {}),
+      },
+      ...(input.capabilityOverrides !== undefined
+        ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
+        : {}),
+      updatedAt: nowIso(),
+    };
+
     if (resolved.profile.engineType === "llama.cpp") {
-      validateBatchSize(input.batchSize);
+      validateBatchSettings(
+        getEffectiveBatchSize(nextProfile),
+        getEffectiveUBatchSize(nextProfile),
+      );
+      if (hasLaunchAffectingModelConfigChanges(input)) {
+        validateEmbeddingRoleOverrides(resolved.artifact, nextProfile);
+      }
     } else if (
       input.contextLength !== undefined ||
       input.batchSize !== undefined ||
+      input.ubatchSize !== undefined ||
       input.gpuLayers !== undefined ||
       input.parallelSlots !== undefined ||
-      input.flashAttentionType !== undefined
+      input.flashAttentionType !== undefined ||
+      input.poolingMethod !== undefined
     ) {
       throw new GatewayRequestError(
         "unsupported_model_config",
@@ -2420,27 +2636,6 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         409,
       );
     }
-
-    const nextProfile: ModelProfile = {
-      ...resolved.profile,
-      ...(input.displayName ? { displayName: input.displayName } : {}),
-      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-      ...(input.defaultTtlMs !== undefined ? { defaultTtlMs: input.defaultTtlMs } : {}),
-      parameterOverrides: {
-        ...resolved.profile.parameterOverrides,
-        ...(input.contextLength !== undefined ? { contextLength: input.contextLength } : {}),
-        ...(input.batchSize !== undefined ? { batchSize: input.batchSize } : {}),
-        ...(input.gpuLayers !== undefined ? { gpuLayers: input.gpuLayers } : {}),
-        ...(input.parallelSlots !== undefined ? { parallelSlots: input.parallelSlots } : {}),
-        ...(input.flashAttentionType !== undefined
-          ? { flashAttentionType: input.flashAttentionType }
-          : {}),
-      },
-      ...(input.capabilityOverrides !== undefined
-        ? { capabilityOverrides: normalizeCapabilityOverrides(input.capabilityOverrides) }
-        : {}),
-      updatedAt: nowIso(),
-    };
 
     const nextCapabilities = getEffectiveCapabilities(resolved.artifact, nextProfile);
     nextProfile.role = deriveRuntimeRole(nextCapabilities);
@@ -2498,6 +2693,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       }
     }
 
+    if (resolved.profile.engineType === "llama.cpp") {
+      const role = getModelRole(resolved.artifact, resolved.profile);
+      validateBatchSettings(
+        getEffectiveBatchSizeForRole(resolved.profile, role),
+        getEffectiveUBatchSize(resolved.profile),
+      );
+      validateEmbeddingRoleOverrides(resolved.artifact, resolved.profile);
+    }
+
     const loadPromise = this.loadWorker(resolved, normalizeTraceId(traceId));
     await loadPromise;
     return {
@@ -2544,6 +2748,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       context.traceId,
       requestRequiresVision(input.messages),
     );
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
 
     try {
@@ -2557,7 +2762,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         promptTokens: usage.promptTokens,
@@ -2575,7 +2780,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2599,6 +2804,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       context.traceId,
       requestRequiresVision(input.messages),
     );
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
     let firstChunkAt: number | undefined;
     let settled = false;
@@ -2707,7 +2913,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
               const safeDurationMs = Math.max(totalDurationMs, 1);
               this.insertApiLog({
                 traceId: context.traceId,
-                modelId: input.model,
+                modelId: logModelId,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2727,7 +2933,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
               controller.error(error);
               this.insertApiLog({
                 traceId: context.traceId,
-                modelId: input.model,
+                modelId: logModelId,
                 endpoint: "/v1/chat/completions",
                 requestIp: context.remoteAddress,
                 ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2747,7 +2953,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
           await reader.cancel().catch(() => undefined);
           this.insertApiLog({
             traceId: context.traceId,
-            modelId: input.model,
+            modelId: logModelId,
             endpoint: "/v1/chat/completions",
             requestIp: context.remoteAddress,
             ttftMs: firstChunkAt ? firstChunkAt - startedAt : undefined,
@@ -2767,7 +2973,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/chat/completions",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2787,6 +2993,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     context: GatewayExecutionContext,
   ): Promise<EmbeddingsResponse> {
     const worker = await this.acquireWorkerForRequest(input.model, "embeddings", context.traceId);
+    const logModelId = worker.artifact.id;
     const startedAt = Date.now();
 
     try {
@@ -2797,7 +3004,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
         promptTokens: estimateTextTokens(input.input),
@@ -2810,7 +3017,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
     } catch (error) {
       this.insertApiLog({
         traceId: context.traceId,
-        modelId: input.model,
+        modelId: logModelId,
         endpoint: "/v1/embeddings",
         requestIp: context.remoteAddress,
         totalDurationMs: Date.now() - startedAt,
@@ -2821,6 +3028,48 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       throw error;
     } finally {
       this.releaseWorkerAfterRequest(worker, context.traceId, "Embeddings request finished.");
+    }
+  }
+
+  async createRerank(
+    input: RerankRequest,
+    context: GatewayExecutionContext,
+  ): Promise<RerankResponse> {
+    const worker = await this.acquireWorkerForRequest(input.model, "rerank", context.traceId);
+    const logModelId = worker.artifact.id;
+    const startedAt = Date.now();
+    const documents = input.documents.map((document) => normalizeRerankDocumentText(document));
+
+    try {
+      const response = await this.fetchWorkerResponse(worker, "/v1/rerank", input);
+      const payload = rerankResponseSchema.parse(worker.adapter.normalizeResponse(await response.json()));
+
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: logModelId,
+        endpoint: "/v1/rerank",
+        requestIp: context.remoteAddress,
+        promptTokens: estimateTextTokens([input.query, ...documents]),
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: response.status,
+        createdAt: nowIso(),
+      });
+
+      return payload;
+    } catch (error) {
+      this.insertApiLog({
+        traceId: context.traceId,
+        modelId: logModelId,
+        endpoint: "/v1/rerank",
+        requestIp: context.remoteAddress,
+        totalDurationMs: Date.now() - startedAt,
+        statusCode: error instanceof GatewayRequestError ? error.statusCode : 500,
+        errorMessage: error instanceof Error ? error.message : "Rerank request failed.",
+        createdAt: nowIso(),
+      });
+      throw error;
+    } finally {
+      this.releaseWorkerAfterRequest(worker, context.traceId, "Rerank request finished.");
     }
   }
 
@@ -3222,7 +3471,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private ensureModelCapability(
     resolved: ResolvedModelRecord,
-    capability: "chat" | "embeddings" | "vision",
+    capability: "chat" | "embeddings" | "rerank" | "vision",
   ): void {
     if (!resolved.capabilities[capability]) {
       throw new GatewayRequestError(
@@ -3235,7 +3484,7 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async acquireWorkerForRequest(
     modelId: string,
-    capability: "chat" | "embeddings" | "vision",
+    capability: "chat" | "embeddings" | "rerank" | "vision",
     traceId: string,
     requiresVision = false,
   ): Promise<ManagedWorker> {
@@ -3344,8 +3593,8 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
 
   private async fetchWorkerResponse(
     worker: ManagedWorker,
-    endpoint: "/v1/chat/completions" | "/v1/embeddings",
-    payload: ChatCompletionsRequest | EmbeddingsRequest,
+    endpoint: "/v1/chat/completions" | "/v1/embeddings" | "/v1/rerank",
+    payload: ChatCompletionsRequest | EmbeddingsRequest | RerankRequest,
   ): Promise<Response> {
     if (worker.harness.command.transport === "filesystem") {
       if (endpoint === "/v1/chat/completions") {
@@ -3363,6 +3612,15 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
             );
       }
 
+      if (endpoint === "/v1/rerank") {
+        return new Response(JSON.stringify(createFakeRerankResponse(payload as RerankRequest)), {
+          status: 200,
+          headers: {
+            "content-type": "application/json; charset=utf-8",
+          },
+        });
+      }
+
       return new Response(
         JSON.stringify(createFakeEmbeddingsResponse(payload as EmbeddingsRequest)),
         {
@@ -3374,12 +3632,22 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       );
     }
 
+    const normalizedPayload =
+      worker.profile.engineType === "mlx"
+        ? {
+            ...payload,
+            // mlx_lm validates request.model against the served model id (/v1/models),
+            // which is the local model path for local directories.
+            model: worker.artifact.localPath,
+          }
+        : payload;
+
     const response = await fetch(`${this.getWorkerBaseUrl(worker)}${endpoint}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(normalizedPayload),
     }).catch((error: unknown) => {
       throw new GatewayRequestError(
         "worker_request_failed",

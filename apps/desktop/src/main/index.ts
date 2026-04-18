@@ -388,6 +388,9 @@ const registerIpcHandlers = (): void => {
   ipcMain.handle(IPC_CHANNELS.gatewayResumeDownload, (_event, id: string) =>
     gatewayManager.resumeDownload(id),
   );
+  ipcMain.handle(IPC_CHANNELS.gatewayRetryDownload, (_event, id: string) =>
+    gatewayManager.retryDownload(id),
+  );
   ipcMain.handle(
     IPC_CHANNELS.gatewayDeleteDownload,
     (_event, id: string, options?: { deleteFiles?: boolean }) =>

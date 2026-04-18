@@ -132,6 +132,11 @@ const api = {
         IPC_CHANNELS.gatewayResumeDownload,
         id,
       ) as Promise<DesktopDownloadActionResponse>,
+    retryDownload: (id: string) =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.gatewayRetryDownload,
+        id,
+      ) as Promise<DesktopDownloadActionResponse>,
     deleteDownload: (id: string, options?: { deleteFiles?: boolean }) =>
       ipcRenderer.invoke(
         IPC_CHANNELS.gatewayDeleteDownload,

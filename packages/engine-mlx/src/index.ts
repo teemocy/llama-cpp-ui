@@ -94,6 +94,76 @@ interface SpawnResult {
   stderr: string;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeMlxResponsePayload(payload: unknown): unknown {
+  if (!isRecord(payload)) {
+    return payload;
+  }
+
+  const normalizedPayload: Record<string, unknown> = {
+    ...payload,
+  };
+
+  if (normalizedPayload.usage === null) {
+    delete normalizedPayload.usage;
+  } else if (isRecord(normalizedPayload.usage)) {
+    const usage = { ...normalizedPayload.usage };
+    for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+      if (usage[key] === null) {
+        usage[key] = 0;
+      }
+    }
+    normalizedPayload.usage = usage;
+  }
+
+  const choices = normalizedPayload.choices;
+  if (Array.isArray(choices)) {
+    normalizedPayload.choices = choices.map((choice) => {
+      if (!isRecord(choice)) {
+        return choice;
+      }
+
+      const normalizedChoice: Record<string, unknown> = {
+        ...choice,
+      };
+
+      if (isRecord(normalizedChoice.message)) {
+        const message = { ...normalizedChoice.message };
+        if (typeof message.reasoning === "string" && message.reasoning_content === undefined) {
+          message.reasoning_content = message.reasoning;
+        }
+        if (message.content === undefined) {
+          message.content = null;
+        }
+        if (message.tool_calls === null) {
+          delete message.tool_calls;
+        }
+        delete message.reasoning;
+        normalizedChoice.message = message;
+      }
+
+      if (isRecord(normalizedChoice.delta)) {
+        const delta = { ...normalizedChoice.delta };
+        if (typeof delta.reasoning === "string" && delta.reasoning_content === undefined) {
+          delta.reasoning_content = delta.reasoning;
+        }
+        if (delta.tool_calls === null) {
+          delete delta.tool_calls;
+        }
+        delete delta.reasoning;
+        normalizedChoice.delta = delta;
+      }
+
+      return normalizedChoice;
+    });
+  }
+
+  return normalizedPayload;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -731,7 +801,7 @@ export function createMlxAdapter(options: MlxAdapterOptions = {}): EngineAdapter
       }
     },
     normalizeResponse(payload: unknown): unknown {
-      return payload;
+      return normalizeMlxResponsePayload(payload);
     },
     capabilities(artifact: ModelArtifact, _profile: ModelProfile): CapabilitySet {
       return {

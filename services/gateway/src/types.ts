@@ -25,6 +25,8 @@ import type {
   EmbeddingsRequest,
   EmbeddingsResponse,
   OpenAiModelCard,
+  RerankRequest,
+  RerankResponse,
   RequestRoute,
   RequestTrace,
   RuntimeKey,
@@ -168,6 +170,7 @@ export interface GatewayRuntime {
   ): MaybePromise<DesktopDownloadActionResponse>;
   pauseDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   resumeDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
+  retryDownload(id: string, traceId?: string): MaybePromise<DesktopDownloadActionResponse>;
   deleteDownload(
     id: string,
     options?: { deleteFiles?: boolean },
@@ -197,5 +200,9 @@ export interface GatewayRuntime {
     input: EmbeddingsRequest,
     context: GatewayExecutionContext,
   ): MaybePromise<EmbeddingsResponse>;
+  createRerank(
+    input: RerankRequest,
+    context: GatewayExecutionContext,
+  ): MaybePromise<RerankResponse>;
   recordRequestTrace(payload: RequestTraceRecord): void;
 }

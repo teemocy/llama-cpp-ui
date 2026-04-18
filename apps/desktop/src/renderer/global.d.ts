@@ -83,6 +83,7 @@ type DesktopApi = {
     createDownload(payload: DesktopDownloadCreateRequest): Promise<DesktopDownloadActionResponse>;
     pauseDownload(id: string): Promise<DesktopDownloadActionResponse>;
     resumeDownload(id: string): Promise<DesktopDownloadActionResponse>;
+    retryDownload(id: string): Promise<DesktopDownloadActionResponse>;
     deleteDownload(
       id: string,
       options?: { deleteFiles?: boolean },

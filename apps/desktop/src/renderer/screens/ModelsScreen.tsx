@@ -51,6 +51,7 @@ type CapabilityKey =
 
 type CapabilityToggleValue = "inherit" | "enabled" | "disabled";
 type FlashAttentionValue = "auto" | "enabled" | "disabled";
+type PoolingMethodValue = "none" | "mean" | "cls" | "last" | "rank";
 
 type ModelDetailTab = "details" | "config";
 
@@ -340,9 +341,11 @@ export function ModelsScreen({
     defaultTtlMinutes: "15",
     contextLength: "",
     batchSize: "",
+    ubatchSize: "",
     gpuLayers: "",
     parallelSlots: "",
     flashAttentionType: "auto" as FlashAttentionValue,
+    poolingMethod: "" as "" | PoolingMethodValue,
     capabilityOverrides: createCapabilityDraft({}),
   });
 
@@ -404,6 +407,9 @@ export function ModelsScreen({
   const hasCapabilityOverrides =
     !!selectedModel && Object.keys(selectedModel.capabilityOverrides).length > 0;
   const selectedModelUsesLlamaRuntime = selectedModel?.engineType === "llama.cpp";
+  const selectedModelRequiresPooledRuntime =
+    selectedModelUsesLlamaRuntime &&
+    (selectedModel?.role === "embeddings" || selectedModel?.role === "rerank");
 
   useEffect(() => {
     if (!selectedModel) {
@@ -421,10 +427,12 @@ export function ModelsScreen({
       defaultTtlMinutes: String(Math.max(1, Math.round(selectedModel.defaultTtlMs / 60_000))),
       contextLength: selectedModel.contextLength ? String(selectedModel.contextLength) : "",
       batchSize: String(selectedModel.batchSize ?? 3072),
+      ubatchSize: String(selectedModel.ubatchSize ?? 512),
       gpuLayers: selectedModel.gpuLayers ? String(selectedModel.gpuLayers) : "",
       parallelSlots: selectedModel.parallelSlots ? String(selectedModel.parallelSlots) : "",
       flashAttentionType:
         (selectedModel.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
+      poolingMethod: (selectedModel.poolingMethod as PoolingMethodValue | undefined) ?? "",
       capabilityOverrides,
     });
   }, [selectedModel?.id]);
@@ -772,8 +780,14 @@ export function ModelsScreen({
       const batchSize = configDraft.batchSize.trim()
         ? Number.parseInt(configDraft.batchSize, 10)
         : 3072;
-      if (selectedModel.engineType === "llama.cpp" && batchSize % 512 !== 0) {
-        throw new Error("Batch size must be a multiple of 512.");
+      const ubatchSize = configDraft.ubatchSize.trim()
+        ? Number.parseInt(configDraft.ubatchSize, 10)
+        : 512;
+      if (selectedModel.engineType === "llama.cpp" && batchSize % ubatchSize !== 0) {
+        throw new Error(`Batch size must be a multiple of ubatch size (${ubatchSize}).`);
+      }
+      if (selectedModelRequiresPooledRuntime && batchSize !== ubatchSize) {
+        throw new Error("Embedding and rerank models must use the same ubatch size as batch size.");
       }
 
       const result = await onUpdateModelConfig(selectedModel.id, {
@@ -784,6 +798,7 @@ export function ModelsScreen({
                 ? { contextLength: Number.parseInt(configDraft.contextLength, 10) }
                 : {}),
               batchSize,
+              ubatchSize,
               ...(configDraft.gpuLayers.trim()
                 ? { gpuLayers: Number.parseInt(configDraft.gpuLayers, 10) }
                 : {}),
@@ -791,6 +806,9 @@ export function ModelsScreen({
                 ? { parallelSlots: Number.parseInt(configDraft.parallelSlots, 10) }
                 : {}),
               flashAttentionType: configDraft.flashAttentionType,
+              ...(configDraft.poolingMethod
+                ? { poolingMethod: configDraft.poolingMethod }
+                : {}),
             }
           : {}),
       });
@@ -799,10 +817,12 @@ export function ModelsScreen({
         defaultTtlMinutes: String(Math.max(1, Math.round(result.model.defaultTtlMs / 60_000))),
         contextLength: result.model.contextLength ? String(result.model.contextLength) : "",
         batchSize: String(result.model.batchSize ?? 3072),
+        ubatchSize: String(result.model.ubatchSize ?? 512),
         gpuLayers: result.model.gpuLayers ? String(result.model.gpuLayers) : "",
         parallelSlots: result.model.parallelSlots ? String(result.model.parallelSlots) : "",
         flashAttentionType:
           (result.model.flashAttentionType as FlashAttentionValue | undefined) ?? "auto",
+        poolingMethod: (result.model.poolingMethod as PoolingMethodValue | undefined) ?? "",
         capabilityOverrides: createCapabilityDraft(result.model.capabilityOverrides),
       });
       setFeedback({
@@ -953,6 +973,23 @@ export function ModelsScreen({
                 <p>{formatModelCardSummary(selectedModel)}</p>
               </div>
               <div className="modal-shell-actions">
+                <span
+                  className={
+                    selectedModel.loaded
+                      ? "status-pill status-pill-caution"
+                      : `status-pill ${getStateToneClass(selectedModel.state)}`
+                  }
+                >
+                  {selectedModel.loaded ? "Loaded in memory" : humanize(selectedModel.state)}
+                </span>
+                <button
+                  className={detailModelAction === "evict" ? "secondary-button" : "primary-button"}
+                  disabled={detailModelActionDisabled}
+                  onClick={() => void runModelAction(detailModelAction)}
+                  type="button"
+                >
+                  {detailModelActionLabel}
+                </button>
                 <button className="secondary-button" onClick={closeModelConfigPanel} type="button">
                   Close
                 </button>
@@ -989,7 +1026,15 @@ export function ModelsScreen({
                       </button>
                     </div>
                   </div>
-                  <span className="status-pill status-pill-positive">No eviction needed</span>
+                  <span
+                    className={
+                      selectedModel.loaded
+                        ? "status-pill status-pill-neutral"
+                        : "status-pill status-pill-positive"
+                    }
+                  >
+                    {selectedModel.loaded ? "Alias edits stay live" : "No eviction needed"}
+                  </span>
                 </div>
               </div>
 
@@ -1015,9 +1060,19 @@ export function ModelsScreen({
                 </div>
                 <p>
                   {selectedModelUsesLlamaRuntime
-                    ? "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
-                    : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
+                    ? selectedModel.loaded
+                      ? "These settings persist to the model profile and apply on the next preload. Use Evict from memory above first so the runtime key stays consistent."
+                      : "These settings persist to the model profile and apply on the next preload. Loaded workers must be evicted first so the runtime key stays consistent."
+                    : selectedModel.loaded
+                      ? "MLX models only expose cross-engine settings in this build. Use Evict from memory above first so the runtime key stays consistent."
+                      : "MLX models only expose cross-engine settings in this build. Loaded workers must be evicted first so the runtime key stays consistent."}
                 </p>
+                {selectedModelRequiresPooledRuntime ? (
+                  <p>
+                    Embedding and rerank workers need matching batch and ubatch sizes. If pooling
+                    is left unset, llama.cpp will use the model default.
+                  </p>
+                ) : null}
 
                 <div className="settings-grid">
                   <label className="field-stack">
@@ -1065,10 +1120,32 @@ export function ModelsScreen({
                             setConfigDraft((current) => ({
                               ...current,
                               batchSize: event.target.value,
+                              ...(selectedModelRequiresPooledRuntime
+                                ? { ubatchSize: event.target.value }
+                                : {}),
                             }))
                           }
                           type="number"
                           value={configDraft.batchSize}
+                        />
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">Ubatch size</span>
+                        <input
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          min="1"
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              ubatchSize: event.target.value,
+                              ...(selectedModelRequiresPooledRuntime
+                                ? { batchSize: event.target.value }
+                                : {}),
+                            }))
+                          }
+                          type="number"
+                          value={configDraft.ubatchSize}
                         />
                       </label>
                       <label className="field-stack">
@@ -1119,6 +1196,27 @@ export function ModelsScreen({
                           <option value="auto">Auto</option>
                           <option value="enabled">Enabled</option>
                           <option value="disabled">Disabled</option>
+                        </select>
+                      </label>
+                      <label className="field-stack">
+                        <span className="section-label">Pooling method</span>
+                        <select
+                          className="text-input"
+                          disabled={!canSaveConfig}
+                          onChange={(event) =>
+                            setConfigDraft((current) => ({
+                              ...current,
+                              poolingMethod: event.target.value as "" | PoolingMethodValue,
+                            }))
+                          }
+                          value={configDraft.poolingMethod}
+                        >
+                          <option value="">Not set</option>
+                          <option value="none">None</option>
+                          <option value="mean">Mean</option>
+                          <option value="cls">CLS</option>
+                          <option value="last">Last</option>
+                          <option value="rank">Rank</option>
                         </select>
                       </label>
                     </>
