@@ -1388,6 +1388,71 @@ describe("gateway stage 2 runtime", () => {
     );
   });
 
+  it("refreshes stored GGUF metadata from companion sidecars on startup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const artifactPath = fixture.artifactPaths[fixtureModelArtifact.id];
+    const artifactDirectory = path.dirname(artifactPath);
+
+    await writeFile(
+      path.join(artifactDirectory, "config.json"),
+      `${JSON.stringify(
+        {
+          _name_or_path: "Qwen3.5-35B-A3B",
+          model_type: "qwen3_moe",
+          max_position_embeddings: 262144,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      path.join(artifactDirectory, "tokenizer_config.json"),
+      `${JSON.stringify(
+        {
+          tokenizer_class: "Qwen2TokenizerFast",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await fixture.runtime.stop();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+    };
+
+    const refreshed = (await restartedRuntime.listDesktopModels()).find(
+      (model) => model.id === fixtureModelArtifact.id,
+    );
+
+    expect(refreshed).toMatchObject({
+      id: fixtureModelArtifact.id,
+      architecture: "qwen3_moe",
+      contextLength: 262144,
+      parameterCount: 35_000_000_000,
+      tokenizer: "Qwen2TokenizerFast",
+    });
+  });
+
   it.runIf(supportsMlxTests)(
     "fails preload before worker startup when a registered MLX directory is incomplete",
     async () => {

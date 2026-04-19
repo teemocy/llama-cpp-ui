@@ -200,7 +200,7 @@ const formatModelCardSummary = (model: DesktopModelRecord): string => {
 };
 
 const modelMetadataHint =
-  "GGUF metadata comes from the model header. MLX metadata is derived from bundled sidecars like config.json, generation_config.json, tokenizer_config.json, tokenizer.json, and quant_strategy.json when available. Parameter counts may still be estimated when a repository does not publish an explicit total.";
+  "GGUF metadata starts with the model header and can be enriched from sidecars like config.json, generation_config.json, tokenizer_config.json, and tokenizer.json when they are present next to the artifact. MLX metadata is derived from bundled sidecars like config.json, generation_config.json, tokenizer_config.json, tokenizer.json, and quant_strategy.json when available. Parameter counts may still be estimated when a repository does not publish an explicit total.";
 
 const getStateToneClass = (state: DesktopModelRecord["state"]): string => {
   switch (state) {

@@ -790,6 +790,21 @@ function shouldRefreshStoredMlxMetadata(stored: StoredModelRecord): boolean {
   );
 }
 
+function shouldRefreshStoredGgufMetadata(
+  stored: StoredModelRecord,
+  manager: LlamaCppModelManager,
+): boolean {
+  const isGgufRecord =
+    stored.profile?.engineType === DEFAULT_ENGINE_TYPE ||
+    stored.artifact.format === "gguf" ||
+    /\.gguf$/i.test(stored.artifact.localPath);
+  if (!isGgufRecord || !existsSync(stored.artifact.localPath)) {
+    return false;
+  }
+
+  return manager.hasCompanionMetadataFiles(stored.artifact.localPath);
+}
+
 function normalizeCapabilityOverrides(
   overrides: ModelProfile["capabilityOverrides"],
 ): CapabilityOverrides {
@@ -1871,6 +1886,30 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       this.publishLog(
         "info",
         `Removed ${removedMissingModelIds.length} missing model registration(s) during startup cleanup.`,
+        undefined,
+        undefined,
+        "system",
+      );
+    }
+    const llamaManager = this.getModelManager(DEFAULT_ENGINE_TYPE) as LlamaCppModelManager;
+    let refreshedGgufMetadataCount = 0;
+    for (const stored of this.#modelsRepository.list()) {
+      if (!shouldRefreshStoredGgufMetadata(stored, llamaManager)) {
+        continue;
+      }
+
+      try {
+        await llamaManager.refreshLocalModelMetadata(stored.artifact.localPath);
+        refreshedGgufMetadataCount += 1;
+      } catch {
+        // Ignore stale or unreadable GGUF sidecars while backfilling stored metadata.
+      }
+    }
+
+    if (refreshedGgufMetadataCount > 0) {
+      this.publishLog(
+        "info",
+        `Refreshed metadata for ${refreshedGgufMetadataCount} GGUF model registration(s).`,
         undefined,
         undefined,
         "system",
