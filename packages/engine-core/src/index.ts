@@ -236,3 +236,20 @@ export function getActiveEngineVersion(
 
   return registry.versions.find((version) => version.versionTag === registry.activeVersionTag);
 }
+
+export function removeEngineVersion(
+  registry: EngineVersionRegistry,
+  versionTag: string,
+): EngineVersionRegistry {
+  const nextVersions = registry.versions.filter((version) => version.versionTag !== versionTag);
+  const { activeVersionTag: _activeVersionTag, ...rest } = registry;
+  const nextActiveVersionTag =
+    registry.activeVersionTag === versionTag ? nextVersions[0]?.versionTag : registry.activeVersionTag;
+
+  return {
+    ...rest,
+    ...(nextActiveVersionTag !== undefined ? { activeVersionTag: nextActiveVersionTag } : {}),
+    versions: nextVersions,
+    updatedAt: new Date().toISOString(),
+  };
+}

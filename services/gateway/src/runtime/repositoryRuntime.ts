@@ -18,7 +18,11 @@ import {
 import {
   type EngineAdapter,
   type EngineInstallResult,
+  readEngineVersionRegistry,
+  removeEngineVersion,
+  resolveEngineSupportPaths,
   runtimeKeyToString,
+  writeEngineVersionRegistry,
 } from "@localhub/engine-core";
 import {
   LlamaCppDownloadManager,
@@ -1534,6 +1538,65 @@ function toRuntimeModelRecord(
   };
 }
 
+function isPathWithinRoot(candidatePath: string, rootPath: string): boolean {
+  const relativePath = path.relative(rootPath, candidatePath);
+  return relativePath !== "" && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+}
+
+function compareEngineRecordPreference(
+  left: EngineVersionRecord,
+  right: EngineVersionRecord,
+  supportRoot: string,
+): number {
+  const leftScore =
+    (left.isActive ? 100 : 0) + (isPathWithinRoot(left.binaryPath, supportRoot) ? 10 : 0);
+  const rightScore =
+    (right.isActive ? 100 : 0) + (isPathWithinRoot(right.binaryPath, supportRoot) ? 10 : 0);
+
+  return (
+    leftScore - rightScore ||
+    left.installedAt.localeCompare(right.installedAt) ||
+    left.binaryPath.localeCompare(right.binaryPath)
+  );
+}
+
+function dedupeEngineVersionRecords(
+  records: EngineVersionRecord[],
+  supportRoot: string,
+): EngineVersionRecord[] {
+  const uniqueRecords = new Map<string, EngineVersionRecord>();
+
+  for (const record of records) {
+    const key = `${record.engineType}:${record.versionTag}`;
+    const existing = uniqueRecords.get(key);
+    if (!existing || compareEngineRecordPreference(record, existing, supportRoot) > 0) {
+      uniqueRecords.set(key, record);
+    }
+  }
+
+  return [...uniqueRecords.values()].sort(
+    (left, right) =>
+      right.installedAt.localeCompare(left.installedAt) ||
+      left.engineType.localeCompare(right.engineType) ||
+      left.versionTag.localeCompare(right.versionTag),
+  );
+}
+
+function inferManagedInstallRootFromBinaryPath(
+  engineType: "llama.cpp" | "mlx",
+  versionTag: string,
+  binaryPath: string,
+): string | undefined {
+  const normalizedBinaryPath = path.resolve(binaryPath);
+  const marker = path.join("engines", engineType, "versions", versionTag);
+  const markerIndex = normalizedBinaryPath.indexOf(marker);
+  if (markerIndex < 0) {
+    return undefined;
+  }
+
+  return normalizedBinaryPath.slice(0, markerIndex + marker.length);
+}
+
 function toEngineRecord(record: EngineVersionRecord): EngineRecord {
   return {
     id: `${record.engineType}:${record.versionTag}`,
@@ -1910,6 +1973,21 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       this.publishLog(
         "info",
         `Refreshed metadata for ${refreshedGgufMetadataCount} GGUF model registration(s).`,
+        undefined,
+        undefined,
+        "system",
+      );
+    }
+    const removedSupersededLlamaReleaseCount = await this.cleanupSupersededManagedLlamaReleaseVersions(
+      {
+        traceId: normalizeTraceId(undefined),
+        reason: "Removed a superseded llama.cpp release during startup cleanup.",
+      },
+    );
+    if (removedSupersededLlamaReleaseCount > 0) {
+      this.publishLog(
+        "info",
+        `Removed ${removedSupersededLlamaReleaseCount} superseded llama.cpp release version(s) during startup cleanup.`,
         undefined,
         undefined,
         "system",
@@ -2567,7 +2645,9 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
   }
 
   listEngines(): EngineRecord[] {
-    return this.#enginesRepository.list().map((record) => toEngineRecord(record));
+    return dedupeEngineVersionRecords(this.#enginesRepository.list(), this.#supportRoot).map(
+      (record) => toEngineRecord(record),
+    );
   }
 
   async installEngineBinary(
@@ -2611,6 +2691,14 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
         }
         installResult = await llamaManager.activateEngineVersion(input.versionTag);
       }
+    }
+
+    if (engineType === DEFAULT_ENGINE_TYPE && input.action === "download-latest-metal") {
+      await this.cleanupSupersededManagedLlamaReleaseVersions({
+        preserveVersionTag: installResult.versionTag,
+        traceId: normalizedTraceId,
+        reason: `Superseded by llama.cpp version ${installResult.versionTag}.`,
+      });
     }
 
     const stored = this.#enginesRepository
@@ -4398,6 +4486,116 @@ export class RepositoryGatewayRuntime implements GatewayRuntime {
       }),
     );
     this.refreshModelSnapshot(worker.artifact, worker.runtimeKey, worker.runtimeKeyString);
+  }
+
+  private getActiveManagedReleaseVersionTag(engineType: "llama.cpp" | "mlx"): string | undefined {
+    const paths = resolveEngineSupportPaths(this.#supportRoot, engineType);
+    const registry = readEngineVersionRegistry(paths.registryFile, engineType);
+    const activeVersion = registry.activeVersionTag
+      ? registry.versions.find((candidate) => candidate.versionTag === registry.activeVersionTag)
+      : undefined;
+
+    return activeVersion?.source === "release" ? activeVersion.versionTag : undefined;
+  }
+
+  private async cleanupSupersededManagedLlamaReleaseVersions(options: {
+    preserveVersionTag?: string;
+    traceId: string;
+    reason: string;
+  }): Promise<number> {
+    const paths = resolveEngineSupportPaths(this.#supportRoot, DEFAULT_ENGINE_TYPE);
+    const registry = readEngineVersionRegistry(paths.registryFile, DEFAULT_ENGINE_TYPE);
+    const managedReleaseVersions = registry.versions.filter((candidate) => candidate.source === "release");
+    if (managedReleaseVersions.length <= 1) {
+      return 0;
+    }
+
+    const preservedVersionTag =
+      options.preserveVersionTag ??
+      this.getActiveManagedReleaseVersionTag(DEFAULT_ENGINE_TYPE) ??
+      managedReleaseVersions
+        .slice()
+        .sort((left, right) => right.installedAt.localeCompare(left.installedAt))[0]?.versionTag;
+    if (!preservedVersionTag) {
+      return 0;
+    }
+
+    const versionTagsToRemove = [
+      ...new Set(
+        managedReleaseVersions
+          .filter((candidate) => candidate.versionTag !== preservedVersionTag)
+          .map((candidate) => candidate.versionTag),
+      ),
+    ];
+
+    for (const versionTag of versionTagsToRemove) {
+      await this.cleanupEngineVersion(DEFAULT_ENGINE_TYPE, versionTag, {
+        traceId: options.traceId,
+        reason: options.reason,
+      });
+    }
+
+    return versionTagsToRemove.length;
+  }
+
+  private async cleanupEngineVersion(
+    engineType: "llama.cpp" | "mlx",
+    versionTag: string,
+    options: {
+      traceId: string;
+      reason: string;
+    },
+  ): Promise<void> {
+    const workersUsingVersion = Array.from(this.#workers.values())
+      .flat()
+      .filter(
+        (worker) =>
+          worker.profile.engineType === engineType && worker.harness.command.versionTag === versionTag,
+      );
+
+    for (const worker of workersUsingVersion) {
+      await this.stopWorker(worker, options.traceId, options.reason);
+    }
+
+    const paths = resolveEngineSupportPaths(this.#supportRoot, engineType);
+    const registry = readEngineVersionRegistry(paths.registryFile, engineType);
+    const installedVersion = registry.versions.find((candidate) => candidate.versionTag === versionTag);
+    const matchingDatabaseRows = this.#enginesRepository
+      .list()
+      .filter((record) => record.engineType === engineType && record.versionTag === versionTag);
+    const nextRegistry = writeEngineVersionRegistry(
+      paths.registryFile,
+      removeEngineVersion(registry, versionTag),
+    );
+
+    const installRoots = new Set<string>();
+    if (installedVersion?.installPath) {
+      installRoots.add(path.resolve(installedVersion.installPath));
+    }
+    for (const record of matchingDatabaseRows) {
+      const derivedInstallRoot = inferManagedInstallRootFromBinaryPath(
+        engineType,
+        versionTag,
+        record.binaryPath,
+      );
+      if (derivedInstallRoot) {
+        installRoots.add(derivedInstallRoot);
+      }
+    }
+
+    for (const installRoot of installRoots) {
+      await rm(installRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+
+    this.#enginesRepository.removeByEngineVersion(engineType, versionTag);
+
+    this.publishLog(
+      "info",
+      `Removed ${engineType} version ${versionTag}. Active version is ${nextRegistry.activeVersionTag ?? "unset"}.`,
+      options.traceId,
+      undefined,
+      "desktop",
+    );
   }
 
   private refreshTtl(worker: ManagedWorker): void {

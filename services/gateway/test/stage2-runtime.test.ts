@@ -12,7 +12,11 @@ import {
   fixtureModelProfile,
   openDatabase,
 } from "@localhub/db";
-import { readEngineVersionRegistry, resolveEngineSupportPaths } from "@localhub/engine-core";
+import {
+  readEngineVersionRegistry,
+  resolveEngineSupportPaths,
+  writeEngineVersionRegistry,
+} from "@localhub/engine-core";
 import { resolveAppPaths } from "@localhub/platform";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -1386,6 +1390,146 @@ describe("gateway stage 2 runtime", () => {
     expect(desktopModels.map((model) => model.id)).toEqual(
       expect.arrayContaining([embeddingsModelArtifact.id, rerankModelArtifact.id]),
     );
+  });
+
+  it("removes superseded llama.cpp release installs during startup cleanup", async () => {
+    const fixture = await createStage2Fixture();
+    const supportRoot = fixture.appPaths.supportRoot;
+    const currentPaths = resolveEngineSupportPaths(supportRoot, "llama.cpp");
+    const legacySupportRoot = path.join(path.dirname(supportRoot), "legacy-support");
+    const oldVersionTag = "release-b8663-darwin-arm64";
+    const newVersionTag = "release-b8840-darwin-arm64";
+    const currentOldInstallRoot = path.join(currentPaths.versionsRoot, oldVersionTag);
+    const currentNewInstallRoot = path.join(currentPaths.versionsRoot, newVersionTag);
+    const currentOldBinaryPath = path.join(currentOldInstallRoot, "llama-b8663", "llama-server");
+    const currentNewBinaryPath = path.join(currentNewInstallRoot, "llama-b8840", "llama-server");
+    const legacyOldInstallRoot = path.join(
+      legacySupportRoot,
+      "engines",
+      "llama.cpp",
+      "versions",
+      oldVersionTag,
+    );
+    const legacyOldBinaryPath = path.join(legacyOldInstallRoot, "llama-b8663", "llama-server");
+
+    await fixture.runtime.stop();
+    await mkdir(path.dirname(currentOldBinaryPath), { recursive: true });
+    await mkdir(path.dirname(currentNewBinaryPath), { recursive: true });
+    await mkdir(path.dirname(legacyOldBinaryPath), { recursive: true });
+    await writeFile(currentOldBinaryPath, "#!/bin/sh\nexit 0\n");
+    await writeFile(currentNewBinaryPath, "#!/bin/sh\nexit 0\n");
+    await writeFile(legacyOldBinaryPath, "#!/bin/sh\nexit 0\n");
+
+    writeEngineVersionRegistry(currentPaths.registryFile, {
+      engineType: "llama.cpp",
+      activeVersionTag: newVersionTag,
+      versions: [
+        {
+          versionTag: oldVersionTag,
+          installPath: currentOldInstallRoot,
+          binaryPath: currentOldBinaryPath,
+          source: "release",
+          channel: "stable",
+          managedBy: "binary",
+          installedAt: "2026-04-18T12:00:00.000Z",
+          notes: ["Downloaded llama.cpp release b8663."],
+        },
+        {
+          versionTag: newVersionTag,
+          installPath: currentNewInstallRoot,
+          binaryPath: currentNewBinaryPath,
+          source: "release",
+          channel: "stable",
+          managedBy: "binary",
+          installedAt: "2026-04-19T12:00:00.000Z",
+          notes: ["Downloaded llama.cpp release b8840."],
+        },
+      ],
+      updatedAt: "2026-04-19T12:00:00.000Z",
+    });
+
+    const seeded = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const engines = new EngineVersionsRepository(seeded.database);
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_old_current",
+      versionTag: oldVersionTag,
+      binaryPath: currentOldBinaryPath,
+      isActive: false,
+      installedAt: "2026-04-18T12:00:00.000Z",
+    });
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_old_legacy",
+      versionTag: oldVersionTag,
+      binaryPath: legacyOldBinaryPath,
+      isActive: false,
+      installedAt: "2026-04-08T12:00:00.000Z",
+    });
+    engines.upsert({
+      ...fixtureEngineVersion,
+      id: "engine_llamacpp_new_current",
+      versionTag: newVersionTag,
+      binaryPath: currentNewBinaryPath,
+      isActive: true,
+      installedAt: "2026-04-19T12:00:00.000Z",
+    });
+    seeded.database.close();
+
+    const restartedRuntime = createRepositoryGatewayRuntime({
+      cwd: process.cwd(),
+      defaultModelTtlMs: 1_000,
+      env: {
+        ...process.env,
+        LOCAL_LLM_HUB_ENV: "test",
+      },
+      fakeWorkerStartupDelayMs: 25,
+      preferFakeWorker: true,
+      supportRoot,
+      localModelsDir: path.join(supportRoot, "models"),
+      telemetryIntervalMs: 50,
+    });
+    await restartedRuntime.start();
+
+    fixture.runtime = restartedRuntime;
+    fixture.cleanup = async () => {
+      await restartedRuntime.stop();
+      await rm(supportRoot, { recursive: true, force: true });
+      await rm(legacySupportRoot, { recursive: true, force: true });
+    };
+
+    const registry = readEngineVersionRegistry(currentPaths.registryFile, "llama.cpp");
+    const reopened = openDatabase({
+      filePath: fixture.appPaths.databaseFile,
+      migrationsDir,
+    });
+    const storedEngines = new EngineVersionsRepository(reopened.database).list();
+    reopened.database.close();
+
+    expect(registry.activeVersionTag).toBe(newVersionTag);
+    expect(registry.versions).toEqual([
+      expect.objectContaining({
+        versionTag: newVersionTag,
+        binaryPath: currentNewBinaryPath,
+      }),
+    ]);
+    expect(storedEngines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          versionTag: newVersionTag,
+          binaryPath: currentNewBinaryPath,
+          isActive: true,
+        }),
+      ]),
+    );
+    expect(storedEngines.find((record) => record.versionTag === oldVersionTag)).toBeUndefined();
+    expect(restartedRuntime.listEngines().find((record) => record.version === oldVersionTag)).toBeUndefined();
+    expect(existsSync(currentOldInstallRoot)).toBe(false);
+    expect(existsSync(legacyOldInstallRoot)).toBe(false);
+    expect(existsSync(currentNewInstallRoot)).toBe(true);
   });
 
   it("refreshes stored GGUF metadata from companion sidecars on startup", async () => {
