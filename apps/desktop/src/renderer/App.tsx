@@ -467,16 +467,12 @@ export function App() {
               path="/models"
               element={
                 <ModelsScreen
-                  engines={engines}
                   models={modelLibrary}
                   runtimeContext={runtimeContext}
                   onDeleteModel={deleteRegisteredModel}
                   onEvictModel={evictModel}
                   onPickImportFile={pickLocalModel}
-                  onPickEngineBinaryFile={pickEngineBinary}
                   onPreloadModel={preloadModel}
-                  onInstallEngineBinary={installEngineBinary}
-                  onActivateEngineVersion={activateEngineVersion}
                   onRegisterModel={registerLocalModel}
                   onUpdateModelConfig={updateModelConfig}
                   onSelectModel={setSelectedModelId}
@@ -507,6 +503,10 @@ export function App() {
               path="/settings"
               element={
                 <SettingsScreen
+                  engines={engines}
+                  onActivateEngineVersion={activateEngineVersion}
+                  onInstallEngineBinary={installEngineBinary}
+                  onPickEngineBinaryFile={pickEngineBinary}
                   onPickModelsDirectory={pickModelsDirectory}
                   onRestartGateway={restartGateway}
                   onShutdownGateway={shutdownGateway}
